@@ -233,7 +233,7 @@ impl AudioBackend for PulseBackend {
         let null_sink_module_id: u32 = match module_id_str.parse() {
             Ok(id) => id,
             Err(err) => {
-                error!("Could not parse null-sink module id {:?}: {:?}", module_id_str, err);
+                error!("Could not parse null sink module id {:?}: {:?}", module_id_str, err);
                 return None;
             }
         };

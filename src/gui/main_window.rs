@@ -570,7 +570,7 @@ impl App {
 
         let microphone_tx = microphone_tx_shared.clone();
         let builder = builder_shared.clone();
-        let ctx_app_indices = ctx_app_indices.clone();
+        let ctx_app_indices_cb = ctx_app_indices.clone();
 
         builder_scope.add_callback("app_capture_switched", move |values| {
             let loopback_switch: adw::SwitchRow = builder.object("loopback_switch").unwrap();
@@ -583,7 +583,7 @@ impl App {
             let combo_row = values[0].get::<adw::ComboRow>().unwrap();
             let selected_pos = combo_row.selected() as usize;
 
-            let app_index = ctx_app_indices.borrow().get(selected_pos).copied();
+            let app_index = ctx_app_indices_cb.borrow().get(selected_pos).copied();
 
             match app_index {
                 Some(u32::MAX) | None => {
