@@ -108,6 +108,47 @@
                               </object>
                             </child>
                             <child>
+                              <object class="AdwPreferencesGroup" id="app_capture_section">
+                                <property name="header-suffix">
+                                  <object class="GtkButton" id="refresh_apps">
+                                    <property name="action-name">win.refresh-apps</property>
+                                    <property name="icon-name">view-refresh-symbolic</property>
+                                    <property name="tooltip-text" translatable="yes">Refresh application list</property>
+                                  </object>
+                                </property>
+                                <property name="title" translatable="yes">Application audio</property>
+                                <property name="visible">False</property>
+                                <child>
+                                  <object class="AdwComboRow" id="app_capture_inputs">
+                                    <property name="factory">
+                                      <object class="GtkBuilderListItemFactory" id="app_capture_inputs_factory">
+                                        <property name="bytes"><![CDATA[<interface>
+  <template class="GtkListItem">
+    <property name="child">
+      <object class="GtkLabel">
+        <property name="xalign">0</property>
+        <property name="ellipsize">PANGO_ELLIPSIZE_END</property>
+        <binding name="label">
+          <lookup name="display_name" type="ListedApp">
+            <lookup name="item">GtkListItem</lookup>
+          </lookup>
+        </binding>
+      </object>
+    </property>
+  </template>
+</interface>]]></property>
+                                      </object>
+                                    </property>
+                                    <property name="model">
+                                      <object class="GListStore" id="app_capture_model"/>
+                                    </property>
+                                    <property name="title" translatable="yes">Capture from</property>
+                                    <signal name="notify::selected-item" handler="app_capture_switched"/>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            <child>
                               <object class="AdwPreferencesGroup" id="results_section">
                                 <property name="title" translatable="yes">Recognition results</property>
                                 <property name="visible">False</property>
@@ -152,6 +193,25 @@
                                     <child>
                                       <object class="GtkButton" id="search_youtube_button">
                                         <property name="action-name">win.search-youtube</property>
+                                        <property name="child">
+                                          <object class="AdwButtonContent">
+                                            <property name="icon-name">search-symbolic</property>
+                                            <property name="label" translatable="yes">Search...</property>
+                                          </object>
+                                        </property>
+                                      </object>
+                                    </child>
+                                  </object>
+                                </child>
+                                <child>
+                                  <object class="AdwActionRow" id="search_soundcloud_row">
+                                    <property name="activatable">True</property>
+                                    <property name="activatable-widget">search_soundcloud_button</property>
+                                    <property name="selectable">False</property>
+                                    <property name="title" translatable="yes">Search on SoundCloud</property>
+                                    <child>
+                                      <object class="GtkButton" id="search_soundcloud_button">
+                                        <property name="action-name">win.search-soundcloud</property>
                                         <property name="child">
                                           <object class="AdwButtonContent">
                                             <property name="icon-name">search-symbolic</property>
@@ -638,6 +698,11 @@ Contributors https://github.com/marin-m/SongRec/graphs/contributors</property>
         <attribute name="icon">search-symbolic</attribute>
         <attribute name="label" translatable="yes">Search on YouTube</attribute>
       </item>
+      <item>
+        <attribute name="action">history-menu.search-on-soundcloud</attribute>
+        <attribute name="icon">search-symbolic</attribute>
+        <attribute name="label" translatable="yes">Search on SoundCloud</attribute>
+      </item>
     </section>
     <section>
       <item>
@@ -680,6 +745,11 @@ Contributors https://github.com/marin-m/SongRec/graphs/contributors</property>
         <attribute name="action">history-menu.search-on-youtube</attribute>
         <attribute name="icon">search-symbolic</attribute>
         <attribute name="label" translatable="yes">Search on YouTube</attribute>
+      </item>
+      <item>
+        <attribute name="action">history-menu.search-on-soundcloud</attribute>
+        <attribute name="icon">search-symbolic</attribute>
+        <attribute name="label" translatable="yes">Search on SoundCloud</attribute>
       </item>
     </section>
     <section>

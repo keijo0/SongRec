@@ -245,6 +245,39 @@ impl ContextMenuUtil {
             .build();
 
         let item = ctx_selected_item.clone();
+        let action_search_soundcloud = gio::ActionEntry::builder("search-on-soundcloud")
+            .activate(clone!(
+                #[weak]
+                window,
+                move |_, _, _| {
+                    if let Some(entry) = &*item.borrow() {
+                        let results_label = entry.song_name();
+
+                        let mut encoded_search_term =
+                            utf8_percent_encode(results_label.as_str(), NON_ALPHANUMERIC)
+                                .to_string();
+                        encoded_search_term = encoded_search_term.replace("%20", "+");
+
+                        let search_url = format!(
+                            "https://soundcloud.com/search?q={}",
+                            encoded_search_term
+                        );
+
+                        glib::spawn_future_local(async move {
+                            info!("Launching URL: {}", search_url);
+                            if let Err(err) = gtk::UriLauncher::new(&search_url)
+                                .launch_future(Some(&window))
+                                .await
+                            {
+                                error!("Could not launch URL {}: {:?}", search_url, err);
+                            }
+                        });
+                    }
+                }
+            ))
+            .build();
+
+        let item = ctx_selected_item.clone();
         let favorites = favorites_interface.clone();
         let action_add_favorites = gio::ActionEntry::builder("add-to-favorites")
             .activate(move |_, _, _| {
@@ -288,6 +321,7 @@ impl ContextMenuUtil {
             action_remove_history,
             action_remove_favorites,
             action_search_youtube,
+            action_search_soundcloud,
         ]);
         window.insert_action_group("history-menu", Some(&actions));
     }

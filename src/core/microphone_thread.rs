@@ -226,6 +226,9 @@ pub fn microphone_thread(
             }
 
             MicrophoneRecordStop => {
+                // Also tear down any per-application capture that was in progress.
+                backend.stop_app_capture();
+
                 if let Some(some_stream) = stream {
                     drop(some_stream);
                 }
@@ -237,6 +240,35 @@ pub fn microphone_thread(
                 let mut processing_already_ongoing_borrow =
                     processing_already_ongoing.lock().unwrap();
                 *processing_already_ongoing_borrow = false;
+            }
+
+            ListApps => {
+                let apps = backend.list_apps();
+                gui_tx
+                    .try_send(GUIMessage::AppsList(Box::new(apps)))
+                    .unwrap();
+            }
+
+            AppCaptureStart(app_index) => {
+                // Stop any existing stream / app capture first.
+                backend.stop_app_capture();
+                if let Some(some_stream) = stream.take() {
+                    drop(some_stream);
+                }
+
+                // Set up the per-application null-sink routing and get the
+                // monitor source name to record from.
+                if let Some(monitor_name) = backend.start_app_capture(app_index) {
+                    microphone_tx
+                        .try_send(MicrophoneMessage::MicrophoneRecordStart(monitor_name))
+                        .unwrap();
+                } else {
+                    gui_tx
+                        .try_send(GUIMessage::ErrorMessage(
+                            "Failed to start application audio capture".to_string(),
+                        ))
+                        .unwrap();
+                }
             }
         }
     }

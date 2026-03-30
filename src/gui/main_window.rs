@@ -34,6 +34,7 @@ use crate::core::preferences::{Preferences, PreferencesInterface};
 use crate::gui::context_menu::ContextMenuUtil;
 use crate::gui::history_entry::HistoryEntry;
 use crate::gui::listed_device::ListedDevice;
+use crate::gui::listed_app::ListedApp;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -60,6 +61,10 @@ struct App {
 
     ctx_selected_item: Rc<RefCell<Option<HistoryEntry>>>,
     ctx_buffered_log: Rc<RefCell<String>>,
+    /// Parallel index vector for the app_capture_inputs ComboRow.
+    /// Position 0 is always u32::MAX ("All applications"); subsequent entries
+    /// hold the PulseAudio sink-input index of the listed application.
+    ctx_app_indices: Rc<RefCell<Vec<u32>>>,
     #[cfg(target_os = "linux")]
     ctx_systray_handle: Rc<RefCell<Option<ksni::Handle<SystrayInterface>>>>,
     ctx_logger_source_id: Rc<RefCell<Option<glib::source::SourceId>>>,
@@ -101,6 +106,8 @@ impl App {
         let ctx_buffered_log: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
         let ctx_logger_source_id: Rc<RefCell<Option<glib::source::SourceId>>> =
             Rc::new(RefCell::new(None));
+        // Sentinel value u32::MAX at position 0 represents "All applications".
+        let ctx_app_indices: Rc<RefCell<Vec<u32>>> = Rc::new(RefCell::new(vec![u32::MAX]));
 
         let history_list_store: gio::ListStore = gio::ListStore::new::<HistoryEntry>();
         let song_history_interface = Rc::new(RefCell::new(
@@ -130,6 +137,7 @@ impl App {
             builder_scope,
             favorites_interface.clone(),
             ctx_selected_item.clone(),
+            ctx_app_indices.clone(),
         );
         builder
             .add_from_resource("/re/fossplant/songrec/interface.ui")
@@ -165,6 +173,7 @@ impl App {
 
             ctx_selected_item,
             ctx_buffered_log,
+            ctx_app_indices,
             ctx_logger_source_id,
 
             gui_tx,
@@ -375,6 +384,7 @@ impl App {
         builder_scope: gtk::BuilderRustScope,
         favorites: Rc<RefCell<FavoritesInterface>>,
         ctx_selected_item: Rc<RefCell<Option<HistoryEntry>>>,
+        ctx_app_indices: Rc<RefCell<Vec<u32>>>,
     ) {
         let microphone_tx = microphone_tx_shared.clone();
         let builder = builder_shared.clone();
@@ -471,11 +481,33 @@ impl App {
                             .unwrap();
                     }
                 }
+
+                // Show application capture section and load app list (PulseAudio only).
+                #[cfg(feature = "pulse")]
+                {
+                    let app_capture_section: adw::PreferencesGroup =
+                        builder.object("app_capture_section").unwrap();
+                    app_capture_section.set_visible(true);
+                    microphone_tx
+                        .try_send(MicrophoneMessage::ListApps)
+                        .unwrap();
+                }
             } else if !microphone_switch.is_active() && !loopback_switch.is_active() {
                 device_section.set_visible(false);
                 microphone_tx
                     .try_send(MicrophoneMessage::MicrophoneRecordStop)
                     .unwrap();
+
+                // Hide application capture section and reset to "All".
+                #[cfg(feature = "pulse")]
+                {
+                    let app_capture_section: adw::PreferencesGroup =
+                        builder.object("app_capture_section").unwrap();
+                    app_capture_section.set_visible(false);
+                    let app_capture_model: gio::ListStore =
+                        builder.object("app_capture_model").unwrap();
+                    app_capture_model.remove_all();
+                }
             }
 
             None
@@ -531,6 +563,52 @@ impl App {
                 microphone_tx
                     .try_send(MicrophoneMessage::MicrophoneRecordStop)
                     .unwrap();
+            }
+
+            None
+        });
+
+        let microphone_tx = microphone_tx_shared.clone();
+        let builder = builder_shared.clone();
+        let ctx_app_indices = ctx_app_indices.clone();
+
+        builder_scope.add_callback("app_capture_switched", move |values| {
+            let loopback_switch: adw::SwitchRow = builder.object("loopback_switch").unwrap();
+
+            // Only act when loopback mode is actually on.
+            if !loopback_switch.is_active() {
+                return None;
+            }
+
+            let combo_row = values[0].get::<adw::ComboRow>().unwrap();
+            let selected_pos = combo_row.selected() as usize;
+
+            let app_index = ctx_app_indices.borrow().get(selected_pos).copied();
+
+            match app_index {
+                Some(u32::MAX) | None => {
+                    // "All applications" – resume monitoring the full loopback device.
+                    let adw_device_row: adw::ComboRow = builder.object("audio_inputs").unwrap();
+                    if let Some(device) = adw_device_row.selected_item() {
+                        let device = device.downcast::<ListedDevice>().unwrap();
+                        if device.is_monitor() {
+                            microphone_tx
+                                .try_send(MicrophoneMessage::MicrophoneRecordStop)
+                                .unwrap();
+                            microphone_tx
+                                .try_send(MicrophoneMessage::MicrophoneRecordStart(
+                                    device.inner_name().to_owned(),
+                                ))
+                                .unwrap();
+                        }
+                    }
+                }
+                Some(idx) => {
+                    // A specific application was chosen – start per-app capture.
+                    microphone_tx
+                        .try_send(MicrophoneMessage::AppCaptureStart(idx))
+                        .unwrap();
+                }
             }
 
             None
@@ -685,6 +763,9 @@ impl App {
         let results_image: gtk::Image = self.builder.object("results_image").unwrap();
         let results_label: gtk::Label = self.builder.object("results_label").unwrap();
         let loopback_switch: adw::SwitchRow = self.builder.object("loopback_switch").unwrap();
+
+        let app_capture_model: gio::ListStore = self.builder.object("app_capture_model").unwrap();
+        let ctx_app_indices = self.ctx_app_indices.clone();
 
         #[cfg(target_os = "linux")]
         systray_setting.set_visible(true);
@@ -1056,6 +1137,25 @@ impl App {
                             }
                         }
                         MicrophoneRecording => {}
+                        AppsList(apps) => {
+                            // Rebuild the app capture combo model.
+                            app_capture_model.remove_all();
+                            let mut indices = ctx_app_indices.borrow_mut();
+                            indices.clear();
+
+                            // Position 0 – always "All applications".
+                            app_capture_model.append(&ListedApp::new(
+                                gettext("All applications"),
+                                u32::MAX,
+                            ));
+                            indices.push(u32::MAX);
+
+                            for app in apps.iter() {
+                                app_capture_model
+                                    .append(&ListedApp::new(app.display_name.clone(), app.index));
+                                indices.push(app.index);
+                            }
+                        }
 
                         MicrophoneVolumePercent(percent) => {
                             volume_gauge.set_fraction((percent / 100.0) as f64);
@@ -1199,6 +1299,35 @@ impl App {
 
                 let search_url = format!(
                     "https://www.youtube.com/results?search_query={}",
+                    encoded_search_term
+                );
+
+                glib::spawn_future_local(async move {
+                    info!("Launching URL: {}", search_url);
+                    if let Err(err) = gtk::UriLauncher::new(&search_url)
+                        .launch_future(Some(&window))
+                        .await
+                    {
+                        error!("Could not launch URL {}: {:?}", search_url, err);
+                    }
+                });
+            })
+            .build();
+
+        let results_label: gtk::Label = self.builder.object("results_label").unwrap();
+
+        let action_search_soundcloud = gio::ActionEntry::builder("search-soundcloud")
+            .activate(move |window: &adw::ApplicationWindow, _, _| {
+                let window = window.clone();
+
+                let results_label = results_label.text();
+
+                let mut encoded_search_term =
+                    utf8_percent_encode(results_label.as_str(), NON_ALPHANUMERIC).to_string();
+                encoded_search_term = encoded_search_term.replace("%20", "+");
+
+                let search_url = format!(
+                    "https://soundcloud.com/search?q={}",
                     encoded_search_term
                 );
 
@@ -1403,6 +1532,16 @@ impl App {
             })
             .build();
 
+        let microphone_tx = self.microphone_tx.clone();
+
+        let action_refresh_apps = gio::ActionEntry::builder("refresh-apps")
+            .activate(move |_, _, _| {
+                microphone_tx
+                    .try_send(MicrophoneMessage::ListApps)
+                    .unwrap();
+            })
+            .build();
+
         let action_show_menu = gio::ActionEntry::builder("show-menu")
             .activate(move |_, _, _| {
                 menu_button.activate();
@@ -1413,6 +1552,7 @@ impl App {
             action_show_about,
             action_recognize_file,
             action_search_youtube,
+            action_search_soundcloud,
             action_export_to_csv,
             action_export_favorites_to_csv,
             action_wipe_history,
@@ -1423,6 +1563,7 @@ impl App {
             action_systray_setting,
             action_no_dupes_setting,
             action_refresh_devices,
+            action_refresh_apps,
             action_close,
             action_show_menu,
         ]);

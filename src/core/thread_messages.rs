@@ -42,6 +42,15 @@ pub struct DeviceListItem {
     pub is_monitor: bool,
 }
 
+/// An audio-playing application visible on the system (PulseAudio sink input).
+#[derive(Debug, Clone)]
+pub struct AppListItem {
+    /// PulseAudio sink-input index used to route the application's audio.
+    pub index: u32,
+    /// Human-readable name of the application.
+    pub display_name: String,
+}
+
 #[derive(Debug)]
 pub enum GUIMessage {
     ErrorMessage(String),
@@ -51,6 +60,8 @@ pub enum GUIMessage {
     // because CPAL can't be called from the same thread as the GUI
     // under Windows
     DevicesList(Box<Vec<DeviceListItem>>),
+    /// A list of applications currently playing audio (PulseAudio sink inputs).
+    AppsList(Box<Vec<AppListItem>>),
     #[cfg(feature = "gui")]
     UpdatePreference(Preferences),
     NetworkStatus(bool),  // Is the network reachable?
@@ -70,6 +81,10 @@ pub enum MicrophoneMessage {
     RefreshDevices,
     MicrophoneRecordStop,
     ProcessingDone,
+    /// Request a list of currently-playing audio applications (PulseAudio only).
+    ListApps,
+    /// Start capturing audio from a specific application by its sink-input index.
+    AppCaptureStart(u32),
 }
 
 pub enum ProcessingMessage {

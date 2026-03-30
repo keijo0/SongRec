@@ -2,7 +2,7 @@ use cpal::platform::{Device, Host};
 use cpal::traits::{DeviceTrait, HostTrait};
 
 use crate::core::audio_controllers::audio_backend::AudioBackend;
-use crate::core::thread_messages::DeviceListItem;
+use crate::core::thread_messages::{AppListItem, DeviceListItem};
 
 pub struct CpalBackend;
 
@@ -49,4 +49,14 @@ impl AudioBackend for CpalBackend {
 
         device
     }
+
+    fn list_apps(&mut self) -> Vec<AppListItem> {
+        vec![]
+    }
+
+    fn start_app_capture(&mut self, _app_index: u32) -> Option<String> {
+        None
+    }
+
+    fn stop_app_capture(&mut self) {}
 }

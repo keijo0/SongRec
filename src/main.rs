@@ -34,6 +34,7 @@ mod gui {
     pub mod context_menu;
     pub mod history_entry;
     pub mod listed_device;
+    pub mod listed_app;
 }
 
 mod utils {
