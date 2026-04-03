@@ -1,0 +1,123 @@
+name: songrec # you probably want to 'snapcraft register <name>'
+adopt-info: share
+title: SongRec
+license: GPL-3.0+
+base: core24 # the base snap is the execution environment for this snap
+version: '0.6.8' # just for humans, typically '1.2+git' or '1.3.2'
+
+grade: stable # must be 'stable' to release into candidate/stable channels
+confinement: strict # use 'strict' once you have the right plugs and slots
+
+apps:
+  songrec:
+    command: bin/songrec
+    command-chain:
+    - snap/command-chain/alsa-launch
+    desktop: usr/share/applications/com.github.marinm.songrec.desktop
+    extensions: [gnome]
+    plugs:
+      - home
+      - network
+      - network-status
+      - unity7
+      - audio-record
+      - audio-playback
+    slots: [dbus-svc, mpris]
+
+slots:
+  dbus-svc: # name that is used with 'snap connect' on slots side
+    interface: dbus
+    bus: session
+    name: com.github.marinm.songrec
+
+parts:
+  songrec:
+    plugin: rust
+    rust-use-global-lto: true
+    source: .
+
+    build-packages:
+      - rustup
+      - libpipewire-0.3-dev
+      - libclang-dev
+      - libasound2-dev
+    stage-packages:
+      - libdrm-common
+      - libproxy1v5
+  
+    after: [share, alsa-mixin]
+  
+  translations:
+    plugin: dump
+    source: translations/
+    source-type: local
+
+    override-pull: |
+      snapcraftctl pull
+
+      mkdir -p bin/translations
+      rm -rf bin/translations/locale
+      mv locale bin/translations/
+      rm -f README.md interface.ui.h songrec.pot update_po_files.sh
+
+  ffmpeg:
+    plugin: dump
+    source: packaging/ffmpeg/linux/
+    source-type: local
+
+    override-pull: |
+      snapcraftctl pull
+
+      mkdir -p bin
+      if [ "$SNAP_ARCH" == "amd64" ]; then
+        mv ffmpeg-*-amd64 bin/ffmpeg
+      fi
+      if [ "$SNAP_ARCH" == "arm64" ]; then
+        mv ffmpeg-*-arm64 bin/ffmpeg
+      fi
+      rm -f ffmpeg-* README.md
+
+  share:
+    plugin: dump
+    source: packaging/rootfs/
+    parse-info: [usr/share/metainfo/re.fossplant.songrec.metainfo.xml]
+    source-type: local
+
+    override-pull: |
+      snapcraftctl pull
+
+      # Point icon to the correct location
+      mv usr/share/applications/re.fossplant.songrec.desktop usr/share/applications/com.github.marinm.songrec.desktop
+      sed -i -e 's|re.fossplant.songrec.desktop|com.github.marinm.songrec.desktop|g' usr/share/metainfo/re.fossplant.songrec.metainfo.xml
+      sed -i -e 's|Icon=re.fossplant.songrec|Icon=/usr/share/icons/hicolor/scalable/apps/re.fossplant.songrec.svg|g' usr/share/applications/com.github.marinm.songrec.desktop
+
+  alsa-mixin:
+    plugin: dump
+    source: packaging/rootfs-snap/
+    source-type: local
+
+    stage-packages:
+      - libasound2-plugins
+    stage:
+      - etc/asound.conf
+      - snap/command-chain/alsa-launch
+      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/alsa-lib
+      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libasound*
+      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libdnsfile*
+      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libFLAC*
+      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libjack*
+      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libpulse*
+      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libsamplerate*
+      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libspeex*
+      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libvorbis*
+      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/pulseaudio
+
+layout:
+  /usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libproxy:
+    bind: $SNAP/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libproxy
+  /usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/alsa-lib:
+    bind: $SNAP/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/alsa-lib
+  /usr/share/alsa:
+    bind: $SNAP/usr/share/alsa
+  /usr/share/libdrm:
+    bind: $SNAP/usr/share/libdrm
