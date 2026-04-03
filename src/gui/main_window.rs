@@ -223,18 +223,14 @@ impl SongRecApp {
                         recognition_date: Local::now().format("%c").to_string(),
                     };
 
-                    let no_dup = self
-                        .preferences_interface
-                        .preferences
-                        .no_duplicates
+                    // Always suppress consecutive identical recognitions: only add the
+                    // song to history when it differs from the most-recent entry.
+                    let already_present = self
+                        .song_history
+                        .records
+                        .first()
+                        .map(|r| r.track_key == Some(msg.track_key.clone()))
                         .unwrap_or(false);
-                    let already_present = no_dup
-                        && self
-                            .song_history
-                            .records
-                            .first()
-                            .map(|r| r.track_key == Some(msg.track_key.clone()))
-                            .unwrap_or(false);
 
                     if !already_present {
                         self.song_history.add_row_and_save(record);
@@ -292,14 +288,6 @@ impl eframe::App for SongRecApp {
                         .changed()
                     {
                         prefs.enable_notifications = Some(notifications);
-                    }
-
-                    let mut no_dup = prefs.no_duplicates.unwrap_or(false);
-                    if ui
-                        .checkbox(&mut no_dup, "Suppress duplicate entries")
-                        .changed()
-                    {
-                        prefs.no_duplicates = Some(no_dup);
                     }
 
                     let mut buf_size = prefs.buffer_size_secs.unwrap_or(12) as f64;
