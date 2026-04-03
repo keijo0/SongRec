@@ -2,7 +2,7 @@ use clap::{command, Arg, ArgAction, Command};
 use flate2::Compression;
 use flate2::GzBuilder;
 use gettextrs::gettext;
-use std::io::prelude::*;
+use std::io::prelude::Write;
 
 // The below is copied from src/main.rs
 
@@ -229,12 +229,6 @@ fn main() {
         .join("man1");
 
     std::fs::create_dir_all(&out_dir).unwrap();
-
-    glib_build_tools::compile_resources(
-        &["src/gui"],
-        "src/gui/resources.gresource.xml",
-        "compiled.gresource",
-    );
 
     clap_mangen::generate_to(app!(), &out_dir).unwrap();
 

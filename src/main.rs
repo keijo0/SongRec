@@ -30,10 +30,6 @@ mod core {
 mod gui {
     pub mod main_window;
     pub mod song_history_interface;
-
-    pub mod context_menu;
-    pub mod history_entry;
-    pub mod listed_device;
 }
 
 mod utils {
@@ -65,7 +61,6 @@ use crate::utils::internationalization::setup_internationalization;
 use clap::{command, Arg, ArgAction, Command};
 use gettextrs::gettext;
 use log::debug;
-use soup::prelude::SessionExt;
 use std::error::Error;
 
 macro_rules! base_app {
@@ -332,22 +327,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .subcommand_matches("audio-file-to-recognized-song")
                 .unwrap();
 
-            let session = soup::Session::new();
-            session.set_timeout(20);
-
             let input_file_string = subcommand_args
                 .get_one::<String>("input_file")
                 .unwrap()
                 .clone();
 
-            let main_loop = glib::MainLoop::new(None, false);
-            let main_loop_inner = main_loop.clone();
-            glib::spawn_future_local(async move {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(20))
+                .build()?;
+
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async move {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(
                         &recognize_song_from_signature(
-                            &session,
+                            &client,
                             &SignatureGenerator::make_signature_from_file(&input_file_string)
                                 .unwrap()
                         )
@@ -356,9 +351,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     )
                     .unwrap()
                 );
-                main_loop_inner.quit();
             });
-            main_loop.run();
         }
         Some("audio-file-to-fingerprint") => {
             let subcommand_args = args
@@ -382,17 +375,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap()
                 .clone();
 
-            let session = soup::Session::new();
-            session.set_timeout(20);
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(20))
+                .build()?;
 
-            let main_loop = glib::MainLoop::new(None, false);
-            let main_loop_inner = main_loop.clone();
-            glib::spawn_future_local(async move {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async move {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(
                         &recognize_song_from_signature(
-                            &session,
+                            &client,
                             &DecodedSignature::decode_from_uri(&fingerprint_string).unwrap()
                         )
                         .await
@@ -400,9 +393,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     )
                     .unwrap()
                 );
-                main_loop_inner.quit();
             });
-            main_loop.run();
         }
         Some("listen") => {
             let subcommand_args = args.subcommand_matches("listen").unwrap();

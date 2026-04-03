@@ -67,12 +67,13 @@ pub fn cli_main(parameters: CLIParameters) -> Result<(), Box<dyn Error>> {
         processing_thread(processing_rx, http_tx, gui_tx_3);
     });
 
-    glib::spawn_future_local(http_task(http_rx, gui_tx, microphone_tx_3));
+    spawn_big_thread(move || {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime for HTTP task");
+        rt.block_on(http_task(http_rx, gui_tx, microphone_tx_3));
+    });
 
-    let main_loop = glib::MainLoop::new(None, false);
-    let loop_inner = main_loop.clone();
-
-    glib::spawn_future_local(async move {
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime for main loop");
+    rt.block_on(async move {
         // Recognize once if an input file is provided
 
         let do_recognize_once = parameters.recognize_once || parameters.input_file.is_some();
@@ -120,7 +121,6 @@ pub fn cli_main(parameters: CLIParameters) -> Result<(), Box<dyn Error>> {
                         );
                     }
                     if parameters.list_devices {
-                        loop_inner.quit();
                         break;
                     }
                     let dev_name = if let Some(dev) = &audio_dev_name {
@@ -249,10 +249,7 @@ pub fn cli_main(parameters: CLIParameters) -> Result<(), Box<dyn Error>> {
         }
 
         gui_rx.close();
-        loop_inner.quit();
     });
-
-    main_loop.run();
 
     Ok(())
 }

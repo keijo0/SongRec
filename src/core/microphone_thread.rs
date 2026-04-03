@@ -15,6 +15,9 @@ use rodio::nz;
 use crate::core::audio_controllers::audio_backend::get_any_backend;
 
 const MAX_BUFFER_SIZE: usize = 512;
+/// Brief delay after setting a new device to let the PulseAudio backend settle
+/// before the microphone thread re-registers itself as a source output.
+const DEVICE_SETTLE_DELAY_MS: u64 = 50;
 
 pub fn microphone_thread(
     microphone_rx: async_channel::Receiver<MicrophoneMessage>,
@@ -128,7 +131,8 @@ pub fn microphone_thread(
                                     // source outputs now
                                     let microphone_tx = microphone_tx.clone();
                                     let device_name = device_name.clone();
-                                    glib::source::timeout_add_once(std::time::Duration::from_millis(50), move || {
+                                    std::thread::spawn(move || {
+                                        std::thread::sleep(std::time::Duration::from_millis(DEVICE_SETTLE_DELAY_MS));
                                         microphone_tx
                                             .try_send(MicrophoneMessage::MicrophoneRecordSetDevice(
                                                 device_name
@@ -169,7 +173,8 @@ pub fn microphone_thread(
                                         // source outputs now
                                         let microphone_tx = microphone_tx.clone();
                                         let device_name = device_name.clone();
-                                        glib::source::timeout_add_once(std::time::Duration::from_millis(50), move || {
+                                        std::thread::spawn(move || {
+                                            std::thread::sleep(std::time::Duration::from_millis(DEVICE_SETTLE_DELAY_MS));
                                             microphone_tx
                                                 .try_send(MicrophoneMessage::MicrophoneRecordSetDevice(
                                                     device_name

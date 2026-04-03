@@ -1,1202 +1,545 @@
-use adw::prelude::*;
+use async_channel::{Receiver, Sender};
 use chrono::Local;
-use gettextrs::gettext;
-use log::{debug, error, info, trace};
-#[cfg(feature = "mpris")]
-use mpris_server::PlaybackStatus;
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-use serde_json::json;
-use std::cell::RefCell;
-use std::error::Error;
-use std::rc::Rc;
+use egui::{ColorImage, Context, TextureHandle, ViewportBuilder};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use crate::core::http_task::http_task;
-use crate::core::logging::Logging;
 use crate::core::microphone_thread::microphone_thread;
-use crate::core::processing_thread::processing_thread;
-use crate::core::thread_messages::{GUIMessage::*, *};
-
-use crate::gui::song_history_interface::{RecognitionHistoryInterface, SongRecordInterface};
-#[cfg(target_os = "linux")]
-use crate::plugins::ksni::SystrayInterface;
-#[cfg(feature = "mpris")]
-use crate::plugins::mpris_player::{get_player, update_song};
-use crate::utils::csv_song_history::SongHistoryRecord;
-use crate::utils::filesystem_operations::{
-    clear_cache, obtain_recognition_history_csv_path,
-};
-
 use crate::core::preferences::{Preferences, PreferencesInterface};
-
-use crate::gui::context_menu::ContextMenuUtil;
-use crate::gui::history_entry::HistoryEntry;
-use crate::gui::listed_device::ListedDevice;
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use crate::core::processing_thread::processing_thread;
+use crate::core::http_task::http_task;
+use crate::core::thread_messages::{
+    spawn_big_thread, DeviceListItem, GUIMessage, MicrophoneMessage, ProcessingMessage,
+};
+use crate::gui::song_history_interface::RecognitionHistoryInterface;
+use crate::utils::csv_song_history::SongHistoryRecord;
+use crate::utils::filesystem_operations::obtain_recognition_history_csv_path;
 
 pub fn gui_main(
-    log_object: Logging,
+    log_object: crate::core::logging::Logging,
     recording: bool,
     input_file: Option<String>,
-    enable_mpris_cli: bool,
-) -> Result<(), Box<dyn Error>> {
-    let app = App::new(log_object);
-    app.run(recording, enable_mpris_cli, input_file);
+    _enable_mpris_cli: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let native_options = eframe::NativeOptions {
+        viewport: ViewportBuilder::default()
+            .with_title("SongRec")
+            .with_inner_size([900.0, 600.0]),
+        ..Default::default()
+    };
 
-    Ok(())
+    eframe::run_native(
+        "SongRec",
+        native_options,
+        Box::new(move |cc| Ok(Box::new(SongRecApp::new(cc, log_object, recording, input_file)))),
+    )
+    .map_err(|e| format!("eframe error: {e}").into())
 }
 
-struct App {
-    builder: gtk::Builder,
+struct SongRecApp {
+    gui_rx: Receiver<GUIMessage>,
+    microphone_tx: Sender<MicrophoneMessage>,
+    processing_tx: Sender<ProcessingMessage>,
 
-    preferences_interface: Arc<Mutex<PreferencesInterface>>,
-    song_history_interface: Rc<RefCell<RecognitionHistoryInterface>>,
-    old_preferences: Preferences,
+    audio_devices: Vec<DeviceListItem>,
+    selected_device_idx: usize,
+    microphone_active: bool,
+    loopback_active: bool,
 
-    ctx_selected_item: Rc<RefCell<Option<HistoryEntry>>>,
-    ctx_buffered_log: Rc<RefCell<String>>,
-    #[cfg(target_os = "linux")]
-    ctx_systray_handle: Rc<RefCell<Option<ksni::Handle<SystrayInterface>>>>,
-    ctx_logger_source_id: Rc<RefCell<Option<glib::source::SourceId>>>,
+    status_message: String,
+    volume_percent: f32,
+    network_ok: bool,
+    rate_limited: bool,
 
-    gui_tx: async_channel::Sender<GUIMessage>,
-    gui_rx: async_channel::Receiver<GUIMessage>,
-    microphone_tx: async_channel::Sender<MicrophoneMessage>,
-    microphone_rx: async_channel::Receiver<MicrophoneMessage>,
-    processing_tx: async_channel::Sender<ProcessingMessage>,
-    processing_rx: async_channel::Receiver<ProcessingMessage>,
-    http_tx: async_channel::Sender<HTTPMessage>,
-    http_rx: async_channel::Receiver<HTTPMessage>,
+    current_artist: String,
+    current_song: String,
+    current_album: String,
+    cover_texture: Option<TextureHandle>,
+
+    song_history: RecognitionHistoryInterface,
+
+    log_text: String,
+    show_about: bool,
+    show_preferences: bool,
+    preferences_interface: PreferencesInterface,
 }
 
-// #[gtk::template_callbacks(functions)]
-impl App {
-    fn new(log_object: Logging) -> App {
-        let (gui_tx, gui_rx) = async_channel::unbounded();
-        let (microphone_tx, microphone_rx) = async_channel::unbounded();
-        let (processing_tx, processing_rx) = async_channel::unbounded();
+impl SongRecApp {
+    fn new(
+        _cc: &eframe::CreationContext<'_>,
+        log_object: crate::core::logging::Logging,
+        recording: bool,
+        input_file: Option<String>,
+    ) -> Self {
+        let (gui_tx, gui_rx) = async_channel::unbounded::<GUIMessage>();
+        let (microphone_tx, microphone_rx) = async_channel::unbounded::<MicrophoneMessage>();
+        let (processing_tx, processing_rx) = async_channel::unbounded::<ProcessingMessage>();
         let (http_tx, http_rx) = async_channel::unbounded();
 
         log_object.connect_to_gui_logger(gui_tx.clone());
 
-        // Set the FreeDesktop ID of the program.
+        let preferences_interface = PreferencesInterface::new();
+        let prefs_arc = Arc::new(Mutex::new(preferences_interface.clone()));
 
-        // We're using a different FreeDesktop and
-        // DBus ID over Snap per request of the
-        // Snapcraft team (they don't want to
-        // allocate us the one that we had to
-        // switch to in order to get verified on Flathub)
-        glib::set_prgname(Some(match std::env::var("SNAP_NAME") {
-            Ok(_) => "com.github.marinm.songrec",
-            _ => "re.fossplant.songrec",
-        }));
-        Self::load_resources();
+        let gui_tx2 = gui_tx.clone();
+        let gui_tx3 = gui_tx.clone();
+        let microphone_tx2 = microphone_tx.clone();
+        let microphone_tx3 = microphone_tx.clone();
+        let processing_tx2 = processing_tx.clone();
 
-        let ctx_selected_item: Rc<RefCell<Option<HistoryEntry>>> = Rc::new(RefCell::new(None));
-        let ctx_buffered_log: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-        let ctx_logger_source_id: Rc<RefCell<Option<glib::source::SourceId>>> =
-            Rc::new(RefCell::new(None));
+        spawn_big_thread(move || {
+            microphone_thread(microphone_rx, microphone_tx2, processing_tx2, gui_tx2, prefs_arc);
+        });
 
-        let history_list_store: gio::ListStore = gio::ListStore::new::<HistoryEntry>();
-        let song_history_interface = Rc::new(RefCell::new(
-            RecognitionHistoryInterface::new(
-                history_list_store.clone(),
-                obtain_recognition_history_csv_path,
-            )
-            .unwrap(),
-        ));
+        spawn_big_thread(move || {
+            processing_thread(processing_rx, http_tx, gui_tx3);
+        });
 
-        let builder = gtk::Builder::new();
+        let gui_tx4 = gui_tx.clone();
+        spawn_big_thread(move || {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime for HTTP task");
+            rt.block_on(http_task(http_rx, gui_tx4, microphone_tx3));
+        });
 
-        let builder_scope = gtk::BuilderRustScope::new();
-        // Self::add_callbacks_to_scope(&scope);
-        builder.set_scope(Some(&builder_scope));
+        let song_history =
+            RecognitionHistoryInterface::new(obtain_recognition_history_csv_path).unwrap_or_else(
+                |_| RecognitionHistoryInterface::new(|| Ok(String::new())).unwrap(),
+            );
 
-        Self::setup_callbacks(
-            microphone_tx.clone(),
-            gui_tx.clone(),
-            builder.clone(),
-            builder_scope,
-            ctx_selected_item.clone(),
-        );
-        builder
-            .add_from_resource("/re/fossplant/songrec/interface.ui")
-            .unwrap();
+        // If an input file was supplied schedule it immediately
+        if let Some(ref file) = input_file {
+            processing_tx
+                .try_send(ProcessingMessage::ProcessAudioFile(file.clone()))
+                .ok();
+        }
 
-        let history_selection: gtk::SingleSelection = builder.object("history_selection").unwrap();
-        history_selection.set_model(Some(&history_list_store));
-
-        let preferences_interface: PreferencesInterface = PreferencesInterface::new();
-        let old_preferences: Preferences = preferences_interface.preferences.clone();
-        let preferences_interface = Arc::new(Mutex::new(preferences_interface));
-
-        App {
-            builder,
-
-            song_history_interface,
-            preferences_interface,
-            old_preferences,
-
-            #[cfg(target_os = "linux")]
-            ctx_systray_handle: Rc::new(RefCell::new(None)),
-
-            ctx_selected_item,
-            ctx_buffered_log,
-            ctx_logger_source_id,
-
-            gui_tx,
+        SongRecApp {
             gui_rx,
             microphone_tx,
-            microphone_rx,
             processing_tx,
-            processing_rx,
-            http_tx,
-            http_rx,
+            audio_devices: Vec::new(),
+            selected_device_idx: 0,
+            microphone_active: recording,
+            loopback_active: false,
+            status_message: String::from("Idle"),
+            volume_percent: 0.0,
+            network_ok: true,
+            rate_limited: false,
+            current_artist: String::new(),
+            current_song: String::new(),
+            current_album: String::new(),
+            cover_texture: None,
+            song_history,
+            log_text: String::new(),
+            show_about: false,
+            show_preferences: false,
+            preferences_interface,
         }
     }
 
-    fn load_resources() {
-        gio::resources_register_include!("compiled.gresource")
-            .expect("Failed to register resources.");
-
-        gtk::init().unwrap();
-
-        if let Some(display) = gdk::Display::default() {
-            let icon_theme = gtk::IconTheme::for_display(&display);
-            icon_theme.add_resource_path("/re/fossplant/songrec/");
+    fn start_microphone(&self) {
+        if let Some(dev) = self.audio_devices.get(self.selected_device_idx) {
+            self.microphone_tx
+                .try_send(MicrophoneMessage::MicrophoneRecordStart(
+                    dev.inner_name.clone(),
+                ))
+                .ok();
         }
-
-        let css_theme = gtk::CssProvider::new();
-        css_theme.load_from_resource("/re/fossplant/songrec/style.css");
     }
 
-    fn run(self, set_recording: bool, enable_mpris_cli: bool, input_file: Option<String>) {
-        let application = adw::Application::new(
-            glib::prgname().as_deref(), // Set the DBus ID of the program.
-            gio::ApplicationFlags::HANDLES_OPEN,
+    fn stop_microphone(&self) {
+        self.microphone_tx
+            .try_send(MicrophoneMessage::MicrophoneRecordStop)
+            .ok();
+    }
+
+    fn open_in_browser(artist: &str, song: &str) {
+        use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+        let query = format!(
+            "{}+{}",
+            utf8_percent_encode(artist, NON_ALPHANUMERIC),
+            utf8_percent_encode(song, NON_ALPHANUMERIC)
         );
-
-        // => https://gtk-rs.org/gtk-rs-core/git/docs/gio/struct.Application.html
-        // => https://gtk-rs.org/gtk-rs-core/git/docs/gio/prelude/trait.ApplicationExtManual.html#method.run
-        // => https://gtk-rs.org/gtk-rs-core/git/docs/gio/struct.ApplicationFlags.html#associatedconstant.HANDLES_COMMAND_LINE
-
-        // We create a callback for handling files to recognize opened
-        // from the command line or through "xdg-open".
-
-        let processing_tx = self.processing_tx.clone();
-
-        application.connect_open(move |_application, files, _hint| {
-            if files.len() >= 1 {
-                if let Some(file_path) = files[0].path() {
-                    let file_path_string = file_path.into_os_string().into_string().unwrap();
-
-                    processing_tx
-                        .try_send(ProcessingMessage::ProcessAudioFile(file_path_string))
-                        .unwrap();
-                }
-            }
-        });
-
-        application.connect_activate(move |application| {
-            let main_window = &application.windows()[0];
-
-            // Raise/highlight the existing window whenever a second
-            // GUI instance is attempted to be launched
-            main_window.present();
-        });
-
-        application.connect_startup(move |application| {
-            self.on_startup(application, set_recording, enable_mpris_cli);
-        });
-
-        if let Some(input_file_string) = input_file {
-            application.run_with_args(&["songrec".to_string(), input_file_string]);
-        } else {
-            application.run_with_args(&["songrec".to_string()]);
-        }
+        let url = format!("https://www.youtube.com/results?search_query={query}");
+        webbrowser::open(&url).ok();
     }
 
-    fn notify_application_error(
-        preferences_interface: Arc<Mutex<PreferencesInterface>>,
-        label: &str,
-        application: &adw::Application,
-    ) {
-        if preferences_interface
-            .lock()
-            .unwrap()
-            .preferences
-            .enable_notifications
-            == Some(true)
-        {
-            let notification = gio::Notification::new(&gettext("Application error"));
-            notification.set_body(Some(&label));
-            notification.set_category(Some("network.error"));
-            application.send_notification(Some("application-error"), &notification);
-        }
-    }
-
-    fn notify_network_error(
-        preferences_interface: Arc<Mutex<PreferencesInterface>>,
-        label: &str,
-        application: &adw::Application,
-        always: bool,
-    ) {
-        if always
-            || preferences_interface
-                .lock()
-                .unwrap()
-                .preferences
-                .enable_notifications
-                == Some(true)
-        {
-            let notification = gio::Notification::new(&gettext("Network error"));
-            notification.set_body(Some(&label));
-            notification.set_category(Some("network.error"));
-            application.send_notification(Some("network-error"), &notification);
-        }
-    }
-
-    fn on_startup(
-        &self,
-        application: &adw::Application,
-        set_recording: bool,
-        enable_mpris_cli: bool,
-    ) {
-        clear_cache();
-        self.setup_intercom(application, set_recording, enable_mpris_cli);
-        self.setup_actions(application, enable_mpris_cli);
-        #[cfg(target_os = "linux")]
-        if self.old_preferences.enable_systray == Some(true) {
-            let window: adw::ApplicationWindow = self.builder.object("main_window").unwrap();
-            Self::setup_systray(self.ctx_systray_handle.clone(), window, self.gui_tx.clone());
-        }
-        self.setup_context_menus();
-        self.show_window(application);
-    }
-
-    #[cfg(target_os = "linux")]
-    fn setup_systray(
-        ctx_systray_handle: Rc<RefCell<Option<ksni::Handle<SystrayInterface>>>>,
-        window: adw::ApplicationWindow,
-        gui_tx: async_channel::Sender<GUIMessage>,
-    ) {
-        glib::spawn_future_local(async move {
-            if ctx_systray_handle.take().is_none() {
-                match SystrayInterface::try_enable(gui_tx).await {
-                    Ok(handle) => {
-                        *ctx_systray_handle.borrow_mut() = Some(handle);
-                        window.set_hide_on_close(true);
-                    }
-                    Err(err) => {
-                        error!(
-                            "{}: {:?}",
-                            gettext("Unable to enable notification icon"),
-                            err
-                        );
+    fn process_messages(&mut self, ctx: &Context) {
+        while let Ok(msg) = self.gui_rx.try_recv() {
+            match msg {
+                GUIMessage::DevicesList(devices) => {
+                    self.audio_devices = *devices;
+                    if self.microphone_active && !self.audio_devices.is_empty() {
+                        self.start_microphone();
                     }
                 }
-            }
-        });
-    }
-
-    #[cfg(target_os = "linux")]
-    fn unsetup_systray(
-        ctx_systray_handle: Rc<RefCell<Option<ksni::Handle<SystrayInterface>>>>,
-        window: adw::ApplicationWindow,
-    ) {
-        let window = window.clone();
-        glib::spawn_future_local(async move {
-            let ctx_systray_handle = ctx_systray_handle.clone();
-            if let Some(handle) = ctx_systray_handle.take() {
-                window.set_hide_on_close(false);
-                *ctx_systray_handle.borrow_mut() = None;
-                SystrayInterface::disable(&handle).await;
-            }
-        });
-    }
-
-    fn setup_context_menus(&self) {
-        ContextMenuUtil::connect_menu_key_actions(
-            self.builder.clone(),
-            self.builder.object("history_view").unwrap(),
-            self.builder.object("history_context_menu").unwrap(),
-            self.ctx_selected_item.clone(),
-        );
-
-        ContextMenuUtil::bind_actions(
-            self.builder.object("main_window").unwrap(),
-            self.ctx_selected_item.clone(),
-            self.song_history_interface.clone(),
-        );
-
-        // See:
-        // https://github.com/shartrec/kelpie-flight-planner/blob/a5575a5/src/window/airport_view.rs#L266 (right click)
-        // https://github.com/shartrec/kelpie-flight-planner/blob/a5575a5/src/window/airport_view.rs#L349 (context menu key)
-        // https://discourse.gnome.org/t/adding-a-context-menu-to-a-listview-using-gtk4-rs/19995/5
-    }
-
-    fn setup_callbacks(
-        microphone_tx_shared: async_channel::Sender<MicrophoneMessage>,
-        gui_tx_shared: async_channel::Sender<GUIMessage>,
-        builder_shared: gtk::Builder,
-        builder_scope: gtk::BuilderRustScope,
-        ctx_selected_item: Rc<RefCell<Option<HistoryEntry>>>,
-    ) {
-        let microphone_tx = microphone_tx_shared.clone();
-        let builder = builder_shared.clone();
-
-        builder_scope.add_callback("history_cell_setup_cb", move |values| {
-            let popover_menu: gtk::PopoverMenu = builder.object("history_context_menu").unwrap();
-
-            let builder = builder.clone();
-            let ctx_selected_item = ctx_selected_item.clone();
-
-            let cell = values[1].get::<gtk::ColumnViewCell>().unwrap();
-
-            let label = gtk::Label::new(None);
-            label.set_xalign(0.0);
-            label.add_css_class("cell_label");
-            cell.set_child(Some(&label));
-
-            ContextMenuUtil::connect_menu_mouse_actions(
-                builder,
-                cell,
-                label,
-                popover_menu,
-                ctx_selected_item,
-            );
-
-            None
-        });
-
-        builder_scope.add_callback("history_cell_bind_cb", move |values| {
-            let col = values[0].get::<gtk::ColumnViewColumn>().unwrap();
-            let cell = values[1].get::<gtk::ColumnViewCell>().unwrap();
-            let label = cell.child().unwrap().downcast::<gtk::Label>().unwrap();
-            let entry = cell.item().unwrap().downcast::<HistoryEntry>().unwrap();
-            let prop_name = col.id().unwrap();
-
-            let text = match prop_name.as_str() {
-                "song_name" => entry.song_name(),
-                "album" => entry.album().unwrap_or(String::new()),
-                "recognition_date" => entry.recognition_date(),
-                _ => unreachable!(),
-            };
-            label.set_text(&text);
-            None
-        });
-
-        let builder = builder_shared.clone();
-
-        builder_scope.add_callback("loopback_options_switched", move |_values| {
-            let loopback_switch: adw::SwitchRow = builder.object("loopback_switch").unwrap();
-            let microphone_switch: adw::SwitchRow = builder.object("microphone_switch").unwrap();
-            let device_section: adw::PreferencesGroup =
-                builder.object("input_device_section").unwrap();
-            let g_list_store: gio::ListStore = builder.object("audio_inputs_model").unwrap();
-
-            if loopback_switch.is_active() {
-                microphone_switch.set_active(false);
-                device_section.set_visible(true);
-
-                let adw_combo_row: adw::ComboRow = builder.object("audio_inputs").unwrap();
-
-                if let Some(current_device) = adw_combo_row.selected_item() {
-                    let current_device = current_device.downcast::<ListedDevice>().unwrap();
-
-                    if !current_device.is_monitor() {
-                        // Choose a monitor mode device instead
-
-                        for position in 0..g_list_store.n_items() {
-                            let other_device = g_list_store
-                                .item(position)
-                                .unwrap()
-                                .downcast::<ListedDevice>()
-                                .unwrap();
-
-                            if other_device.is_monitor() {
-                                adw_combo_row.set_selected(position);
-                                break;
-                            }
-                        }
-                    } else {
-                        microphone_tx
-                            .try_send(MicrophoneMessage::MicrophoneRecordStop)
-                            .unwrap();
-                        microphone_tx
-                            .try_send(MicrophoneMessage::MicrophoneRecordStart(
-                                current_device.inner_name().to_owned(),
-                            ))
-                            .unwrap();
+                GUIMessage::MicrophoneRecording => {
+                    self.status_message = "Recording…".to_string();
+                }
+                GUIMessage::MicrophoneVolumePercent(v) => {
+                    self.volume_percent = v;
+                }
+                GUIMessage::NetworkStatus(ok) => {
+                    self.network_ok = ok;
+                    if !ok {
+                        self.status_message = "Network unreachable".to_string();
                     }
                 }
-            } else if !microphone_switch.is_active() && !loopback_switch.is_active() {
-                device_section.set_visible(false);
-                microphone_tx
-                    .try_send(MicrophoneMessage::MicrophoneRecordStop)
-                    .unwrap();
-            }
-
-            None
-        });
-
-        let microphone_tx = microphone_tx_shared.clone();
-        let builder = builder_shared.clone();
-
-        builder_scope.add_callback("microphone_option_switched", move |_values| {
-            let microphone_switch: adw::SwitchRow = builder.object("microphone_switch").unwrap();
-            let loopback_switch: adw::SwitchRow = builder.object("loopback_switch").unwrap();
-            let device_section: adw::PreferencesGroup =
-                builder.object("input_device_section").unwrap();
-            let g_list_store: gio::ListStore = builder.object("audio_inputs_model").unwrap();
-
-            if microphone_switch.is_active() {
-                loopback_switch.set_active(false);
-                device_section.set_visible(true);
-
-                let adw_combo_row: adw::ComboRow = builder.object("audio_inputs").unwrap();
-
-                if let Some(current_device) = adw_combo_row.selected_item() {
-                    let current_device = current_device.downcast::<ListedDevice>().unwrap();
-
-                    if current_device.is_monitor() {
-                        // Choose a non-monitor mode device instead
-
-                        for position in 0..g_list_store.n_items() {
-                            let other_device = g_list_store
-                                .item(position)
-                                .unwrap()
-                                .downcast::<ListedDevice>()
-                                .unwrap();
-
-                            if !other_device.is_monitor() {
-                                adw_combo_row.set_selected(position);
-                                break;
-                            }
-                        }
-                    } else {
-                        microphone_tx
-                            .try_send(MicrophoneMessage::MicrophoneRecordStop)
-                            .unwrap();
-                        microphone_tx
-                            .try_send(MicrophoneMessage::MicrophoneRecordStart(
-                                current_device.inner_name().to_owned(),
-                            ))
-                            .unwrap();
+                GUIMessage::RateLimitState(limited) => {
+                    self.rate_limited = limited;
+                    if limited {
+                        self.status_message = "Rate limited — waiting…".to_string();
                     }
                 }
-            } else if !microphone_switch.is_active() && !loopback_switch.is_active() {
-                device_section.set_visible(false);
-                microphone_tx
-                    .try_send(MicrophoneMessage::MicrophoneRecordStop)
-                    .unwrap();
-            }
-
-            None
-        });
-
-        let microphone_tx = microphone_tx_shared.clone();
-        let gui_tx = gui_tx_shared.clone();
-        let builder = builder_shared.clone();
-
-        builder_scope.add_callback("input_device_switched", move |values| {
-            let microphone_switch: adw::SwitchRow = builder.object("microphone_switch").unwrap();
-            let loopback_switch: adw::SwitchRow = builder.object("loopback_switch").unwrap();
-
-            let combo_row = values[0].get::<adw::ComboRow>().unwrap();
-
-            // Plug the sound
-
-            if let Some(device) = combo_row.selected_item() {
-                let device = device.downcast::<ListedDevice>().unwrap();
-
-                let device_name = device.inner_name();
-                let is_monitor = device.is_monitor();
-
-                if microphone_switch.is_active() && is_monitor {
-                    microphone_switch.set_active(false);
-                    loopback_switch.set_active(true);
-                } else if loopback_switch.is_active() && !is_monitor {
-                    loopback_switch.set_active(false);
-                    microphone_switch.set_active(true);
+                GUIMessage::ErrorMessage(e) => {
+                    self.status_message = e;
                 }
+                GUIMessage::SongRecognized(msg) => {
+                    self.current_artist = msg.artist_name.clone();
+                    self.current_song = msg.song_name.clone();
+                    self.current_album = msg.album_name.clone().unwrap_or_default();
+                    self.status_message = format!("{} — {}", msg.artist_name, msg.song_name);
 
-                // Save the selected microphone device name so that it is
-                // remembered after relaunching the app
-
-                let mut new_preference = Preferences::new();
-                new_preference.current_device_name = Some(device_name.to_string());
-                gui_tx
-                    .try_send(GUIMessage::UpdatePreference(new_preference))
-                    .unwrap();
-
-                // Should we start recording yet? (will depend of the possible
-                // command line flags of the application)
-
-                if microphone_switch.is_active() || loopback_switch.is_active() {
-                    microphone_tx
-                        .try_send(MicrophoneMessage::MicrophoneRecordStop)
-                        .unwrap();
-                    microphone_tx
-                        .try_send(MicrophoneMessage::MicrophoneRecordStart(
-                            device_name.to_owned(),
-                        ))
-                        .unwrap();
-                }
-            }
-            None
-        });
-
-        let gui_tx = gui_tx_shared.clone();
-
-        builder_scope.add_callback("buffer_size_changed", move |values| {
-            let adjustment = values[0].get::<gtk::Adjustment>().unwrap();
-            debug!("Buffer size set to: {}", adjustment.value());
-            let mut new_preference = Preferences::new();
-            new_preference.buffer_size_secs = Some(adjustment.value() as u64);
-            gui_tx
-                .try_send(GUIMessage::UpdatePreference(new_preference))
-                .unwrap();
-            None
-        });
-
-        let gui_tx = gui_tx_shared.clone();
-
-        builder_scope.add_callback("interval_changed", move |values| {
-            let adjustment = values[0].get::<gtk::Adjustment>().unwrap();
-            debug!("Request interval set to: {}", adjustment.value());
-            let mut new_preference = Preferences::new();
-            new_preference.request_interval_secs_v3 = Some(adjustment.value() as u64);
-            gui_tx
-                .try_send(GUIMessage::UpdatePreference(new_preference))
-                .unwrap();
-            None
-        });
-
-        let builder = builder_shared;
-
-        builder_scope.add_callback("about_dialog_closed", move |_values| {
-            let about_dialog: adw::AboutDialog = builder.object("about_dialog").unwrap();
-            about_dialog.set_visible(false);
-            None
-        });
-    }
-
-    fn setup_intercom(
-        &self,
-        application: &adw::Application,
-        set_recording: bool,
-        enable_mpris_cli: bool,
-    ) {
-        // Setup communication using threads + smol-rs/async-channel::unbounded listener
-
-        // NOTE: Dropping the removed glib::MainContext from legacy code:
-        // https://discourse.gnome.org/t/help-required-to-migrate-from-dropped-maincontext-channel-api/20922
-        // + https://gtk-rs.org/gtk4-rs/stable/latest/book/main_event_loop.html#how-to-avoid-blocking-the-main-loop
-
-        let microphone_rx = self.microphone_rx.clone();
-        let microphone_tx = self.microphone_tx.clone();
-        let processing_tx = self.processing_tx.clone();
-        let gui_tx = self.gui_tx.clone();
-        let preferences_interface = self.preferences_interface.clone();
-        spawn_big_thread(move || {
-            microphone_thread(
-                microphone_rx,
-                microphone_tx,
-                processing_tx,
-                gui_tx,
-                preferences_interface,
-            );
-        });
-
-        let processing_rx = self.processing_rx.clone();
-        let http_tx = self.http_tx.clone();
-        let gui_tx = self.gui_tx.clone();
-        spawn_big_thread(move || {
-            processing_thread(processing_rx, http_tx, gui_tx);
-        });
-
-        let http_rx = self.http_rx.clone();
-        let gui_tx = self.gui_tx.clone();
-        let microphone_tx = self.microphone_tx.clone();
-        glib::spawn_future_local(http_task(http_rx, gui_tx, microphone_tx));
-
-        let gui_rx = self.gui_rx.clone();
-        let preferences_interface_ptr = self.preferences_interface.clone();
-
-        let old_device_name = self.old_preferences.current_device_name.clone();
-
-        let window: adw::ApplicationWindow = self.builder.object("main_window").unwrap();
-        let adw_combo_row: adw::ComboRow = self.builder.object("audio_inputs").unwrap();
-        let g_list_store: gio::ListStore = self.builder.object("audio_inputs_model").unwrap();
-        let microphone_switch: adw::SwitchRow = self.builder.object("microphone_switch").unwrap();
-        let recognize_file_row: adw::PreferencesRow =
-            self.builder.object("recognize_file_row").unwrap();
-        let spinner_row: adw::PreferencesRow = self.builder.object("spinner_row").unwrap();
-        let volume_row: adw::PreferencesRow = self.builder.object("volume_row").unwrap();
-        let volume_gauge: gtk::ProgressBar = self.builder.object("volume_gauge").unwrap();
-        let results_section: adw::PreferencesGroup =
-            self.builder.object("results_section").unwrap();
-        let no_network_message: gtk::Label = self.builder.object("no_network_message").unwrap();
-        let rate_limited_message: gtk::Label = self.builder.object("rate_limited_message").unwrap();
-        let results_image: gtk::Image = self.builder.object("results_image").unwrap();
-        let results_label: gtk::Label = self.builder.object("results_label").unwrap();
-        let loopback_switch: adw::SwitchRow = self.builder.object("loopback_switch").unwrap();
-
-        microphone_switch.set_active(set_recording);
-
-        let song_history_interface = self.song_history_interface.clone();
-        let old_preferences = self.old_preferences.clone();
-        let ctx_buffered_log = self.ctx_buffered_log.clone();
-        let application = application.clone();
-
-        glib::spawn_future_local(async move {
-            #[cfg(feature = "mpris")]
-            let mut mpris_obj = {
-                let player = if enable_mpris_cli && old_preferences.enable_mpris_v2 != Some(false) {
-                    let player_maybe = get_player(true).await;
-                    if let Some(ref player) = player_maybe {
-                        let application = application.clone();
-                        let window = window.clone();
-                        player.connect_quit(move |_player| {
-                            application.quit();
-                        });
-                        player.connect_raise(move |_player| {
-                            window.present();
-                        });
-                    }
-                    player_maybe
-                } else {
-                    None
-                };
-                if enable_mpris_cli
-                    && old_preferences.enable_mpris_v2 != Some(false)
-                    && player.is_none()
-                {
-                    println!("{}", gettext("Unable to enable MPRIS support"))
-                }
-                player
-            };
-            #[cfg(feature = "mpris")]
-            let mut last_cover_path = None;
-
-            while let Ok(gui_message) = gui_rx.recv().await {
-                if let AppendToLog(log_string) = gui_message {
-                    const MAX_LOG_SIZE: usize = 2 * 1024 * 1024; // 2 MB
-
-                    {
-                        let buffer_ptr: &mut String = &mut *ctx_buffered_log.borrow_mut();
-                        buffer_ptr.push_str(&log_string);
-                        if buffer_ptr.len() > MAX_LOG_SIZE {
-                            let to_cut: String = buffer_ptr
-                                .chars()
-                                .take(buffer_ptr.len() - MAX_LOG_SIZE)
-                                .collect();
-                            buffer_ptr.drain(..to_cut.len());
-                        }
-                    }
-                } else {
-                    if let MicrophoneVolumePercent(_) = gui_message {
-                        trace!("Received GUI message: {:?}", gui_message);
-                    } else if let SongRecognized(ref msg) = gui_message {
-                        debug!("Received GUI message: SongRecognized({})", json!({
-                            "artist_name": msg.artist_name.clone(),
-                            "album_name": msg.album_name.clone(),
-                            "song_name": msg.song_name.clone(),
-                            "cover_image": match &msg.cover_image {
-                                Some(data) => Some::<String>(format!("{:02x?}...", &data[..16]).into()),
-                                None => None
-                            },
-                            "track_key": msg.track_key.clone(),
-                            "release_year": msg.release_year.clone(),
-                            "genre": msg.genre.clone(),
-                            "shazam_json": msg.shazam_json.clone()
-                        }).to_string());
-                    } else {
-                        debug!("Received GUI message: {:?}", gui_message);
-                    }
-
-                    match gui_message {
-                        ErrorMessage(_) | NetworkStatus(_) | SongRecognized(_) => {
-                            recognize_file_row.set_sensitive(true);
-                            spinner_row.set_visible(false);
-                        }
-                        _ => {}
-                    }
-
-                    match gui_message {
-                        UpdatePreference(new_preference) => {
-                            preferences_interface_ptr
-                                .lock()
-                                .unwrap()
-                                .update(new_preference);
-                            #[cfg(feature = "mpris")]
-                            if enable_mpris_cli {
-                                let mpris_enabled = preferences_interface_ptr
-                                    .lock()
-                                    .unwrap()
-                                    .preferences
-                                    .enable_mpris_v2
-                                    != Some(false);
-
-                                if mpris_enabled && mpris_obj.is_none() {
-                                    mpris_obj = {
-                                        let player_maybe = get_player(true).await;
-                                        if let Some(ref player) = player_maybe {
-                                            let application = application.clone();
-                                            let window = window.clone();
-                                            player.connect_quit(move |_player| {
-                                                application.quit();
-                                            });
-                                            player.connect_raise(move |_player| {
-                                                window.present();
-                                            });
-                                        } else {
-                                            println!(
-                                                "{}",
-                                                gettext("Unable to enable MPRIS support")
-                                            )
-                                        }
-                                        player_maybe
-                                    };
-                                } else if let Some(ref player) = mpris_obj {
-                                    if mpris_enabled != player.can_play() {
-                                        player.set_can_play(mpris_enabled).await.ok();
-                                    }
-                                }
-                            }
-                        }
-                        ErrorMessage(string) => {
-                            if !(string == gettext("No match for this song")
-                                && (microphone_switch.is_active() || loopback_switch.is_active()))
-                            {
-                                error!("Displaying error: {}", string);
-                                let dialog = adw::AlertDialog::builder()
-                                    .body(&string)
-                                    .close_response("ok")
-                                    .default_response("ok")
-                                    .build();
-                                dialog.add_responses(&[("ok", &gettext("_Ok"))]);
-                                glib::spawn_future_local(dialog.choose_future(Some(&window)));
-
-                                if string != gettext("No match for this song") {
-                                    Self::notify_application_error(
-                                        preferences_interface_ptr.clone(),
-                                        &string,
-                                        &application.clone(),
-                                    );
-                                }
-                            }
-                        }
-                        RateLimitState(is_rate_limited) => {
-                            if is_rate_limited && !rate_limited_message.is_visible() {
-                                Self::notify_network_error(
-                                    preferences_interface_ptr.clone(),
-                                    &rate_limited_message.label(),
-                                    &application.clone(),
-                                    true,
-                                );
-                            }
-                            rate_limited_message.set_visible(is_rate_limited);
-                        }
-                        NetworkStatus(network_is_reachable) => {
-                            if !network_is_reachable && !no_network_message.is_visible() {
-                                Self::notify_network_error(
-                                    preferences_interface_ptr.clone(),
-                                    &no_network_message.label(),
-                                    &application.clone(),
-                                    false,
-                                );
-                            }
-                            no_network_message.set_visible(!network_is_reachable);
-
-                            #[cfg(feature = "mpris")]
-                            {
-                                let mpris_enabled = preferences_interface_ptr
-                                    .lock()
-                                    .unwrap()
-                                    .preferences
-                                    .enable_mpris_v2
-                                    != Some(false);
-
-                                if mpris_enabled {
-                                    let mpris_status = if network_is_reachable {
-                                        PlaybackStatus::Playing
-                                    } else {
-                                        PlaybackStatus::Paused
-                                    };
-
-                                    if let Some(ref player) = mpris_obj {
-                                        if let Err(error) =
-                                            player.set_playback_status(mpris_status).await
-                                        {
-                                            error!(
-                                                "Could not set MPRIS playback status: {:?}",
-                                                error
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        SongRecognized(message) => {
-                            results_section.set_visible(true);
-
-                            // https://gtk-rs.org/gtk4-rs/git/docs/gdk4/struct.Texture.html#method.from_bytes
-                            // https://docs.gtk.org/gdk4/ctor.Texture.new_from_bytes.html
-                            // The file format is detected automatically. The supported formats are PNG, JPEG and TIFF, though more formats might be available.
-
-                            // + https://gtk-rs.org/gtk4-rs/git/docs/gtk4/struct.Image.html#method.set_paintable
-                            // + https://docs.gtk.org/gtk4/method.Image.set_from_paintable.html
-
-                            let song_name =
-                                format!("{} - {}", message.artist_name, message.song_name);
-
-                            if results_label.text().as_str() != &song_name {
-                                results_label.set_label(&song_name);
-
-                                let notification =
-                                    gio::Notification::new(&gettext("Song recognized"));
-                                notification.set_body(Some(&song_name));
-
-                                if let Some(ref cover_image) = message.cover_image {
-                                    if let Ok(texture) =
-                                        gdk::Texture::from_bytes(&glib::Bytes::from(cover_image))
-                                    {
-                                        results_image.set_visible(true);
-                                        results_image.set_paintable(Some(&texture));
-
-                                        match message.album_name {
-                                            Some(ref value) => {
-                                                results_image.set_tooltip_text(Some(&value))
-                                            }
-                                            None => results_image.set_tooltip_text(None),
-                                        };
-                                        notification.set_icon(&texture);
-                                    } else {
-                                        results_image.set_visible(false);
-                                    }
-                                } else {
-                                    results_image.set_visible(false);
-                                }
-
-                                #[cfg(feature = "mpris")]
-                                if preferences_interface_ptr
-                                    .lock()
-                                    .unwrap()
-                                    .preferences
-                                    .enable_mpris_v2
-                                    != Some(false)
-                                {
-                                    if let Some(ref player) = mpris_obj {
-                                        update_song(player, &message, &mut last_cover_path).await;
-                                    }
-                                }
-
-                                if preferences_interface_ptr
-                                    .lock()
-                                    .unwrap()
-                                    .preferences
-                                    .enable_notifications
-                                    == Some(true)
-                                {
-                                    application
-                                        .send_notification(Some("recognized-song"), &notification);
-                                }
-
-                                let new_entry = SongHistoryRecord {
-                                    song_name: song_name,
-                                    album: Some(
-                                        message
-                                            .album_name
-                                            .as_ref()
-                                            .unwrap_or(&"".to_string())
-                                            .to_string(),
-                                    ),
-                                    track_key: Some(message.track_key),
-                                    release_year: Some(
-                                        message
-                                            .release_year
-                                            .as_ref()
-                                            .unwrap_or(&"".to_string())
-                                            .to_string(),
-                                    ),
-                                    genre: Some(
-                                        message
-                                            .genre
-                                            .as_ref()
-                                            .unwrap_or(&"".to_string())
-                                            .to_string(),
-                                    ),
-                                    recognition_date: Local::now().format("%c").to_string(),
-                                };
-
-                                if preferences_interface_ptr
-                                    .lock()
-                                    .unwrap()
-                                    .preferences
-                                    .no_duplicates
-                                    == Some(true)
-                                {
-                                    song_history_interface
-                                        .borrow_mut()
-                                        .remove(new_entry.clone());
-                                }
-                                song_history_interface
-                                    .borrow_mut()
-                                    .add_row_and_save(new_entry);
-                            }
-                        }
-                        // This message is sent once in the program execution for
-                        // the moment (maybe it should be updated automatically
-                        // later?):
-                        DevicesList(devices) => {
-                            let mut initial_device_index: u32 = 0;
-                            let mut initial_device: Option<ListedDevice> = None;
-                            let mut found_monitor_device = false;
-                            let mut current_index: u32 = 0;
-
-                            // Fill in the list of available devices, and
-                            // set back the old device if it was recorded
-
-                            g_list_store.remove_all();
-
-                            for device in devices.iter() {
-                                // device: thread_messages::DeviceListItem
-                                let listed_device = ListedDevice::new(
-                                    device.display_name.clone(),
-                                    device.inner_name.clone(),
-                                    device.is_monitor,
-                                );
-                                g_list_store.append(&listed_device);
-
-                                if old_device_name == Some(device.inner_name.to_string()) {
-                                    initial_device_index = current_index;
-                                    initial_device = Some(listed_device);
-                                } else if old_device_name == None
-                                    && device.is_monitor
-                                    && !found_monitor_device
-                                {
-                                    initial_device_index = current_index;
-                                    initial_device = Some(listed_device);
-                                } else if current_index == 0 {
-                                    initial_device = Some(listed_device);
-                                }
-                                current_index += 1;
-
-                                if device.is_monitor {
-                                    found_monitor_device = true;
-                                }
-                            }
-
-                            if let Some(device) = initial_device {
-                                // device: ListedDevice
-                                adw_combo_row.set_selected(initial_device_index);
-                                loopback_switch.set_visible(found_monitor_device);
-
-                                debug!(
-                                    "Initially selected audio input device: {:?} / {:?}",
-                                    device.inner_name(),
-                                    device.display_name()
-                                );
-
-                                microphone_switch.set_visible(true);
-                                volume_row.set_visible(true);
-
-                                // Will trigger the "input_device_switched" callback
-                            }
-                        }
-                        MicrophoneRecording => {}
-
-                        MicrophoneVolumePercent(percent) => {
-                            volume_gauge.set_fraction((percent / 100.0) as f64);
-                        }
-
-                        WipeSongHistory => {
-                            let dialog = adw::AlertDialog::builder()
-                                .body(&gettext("Are you sure you want to wipe history?"))
-                                .default_response("yes")
-                                .close_response("no")
-                                .build();
-
-                            dialog.add_responses(&[
-                                ("yes", &gettext("_Yes")),
-                                ("no", &gettext("_No")),
-                            ]);
-
-                            let song_history_interface = song_history_interface.clone();
-                            dialog.choose(
-                                Some(&window),
-                                None::<&gio::Cancellable>,
-                                move |result| {
-                                    if result == "yes" {
-                                        song_history_interface.borrow_mut().wipe_and_save();
-                                    }
-                                },
+                    if let Some(ref bytes) = msg.cover_image {
+                        if let Ok(img) = image::load_from_memory(bytes) {
+                            let img = img.to_rgba8();
+                            let (w, h) = img.dimensions();
+                            let pixels = img.into_raw();
+                            let color_image = ColorImage::from_rgba_unmultiplied(
+                                [w as usize, h as usize],
+                                &pixels,
                             );
-                        }
-
-                        ShowWindow => {
-                            window.present();
-                        }
-
-                        QuitApplication => {
-                            application.quit();
-                        }
-
-                        _ => {
-                            debug!("(parsing unimplemented yet): {:?}", gui_message);
+                            self.cover_texture =
+                                Some(ctx.load_texture("cover", color_image, Default::default()));
                         }
                     }
 
-                    // Possibly handle missing messages here
+                    let record = SongHistoryRecord {
+                        song_name: format!("{} — {}", msg.artist_name, msg.song_name),
+                        album: msg.album_name.clone(),
+                        track_key: Some(msg.track_key.clone()),
+                        release_year: msg.release_year.clone(),
+                        genre: msg.genre.clone(),
+                        recognition_date: Local::now().format("%c").to_string(),
+                    };
+
+                    let no_dup = self
+                        .preferences_interface
+                        .preferences
+                        .no_duplicates
+                        .unwrap_or(false);
+                    let already_present = no_dup
+                        && self
+                            .song_history
+                            .records
+                            .first()
+                            .map(|r| r.track_key == Some(msg.track_key.clone()))
+                            .unwrap_or(false);
+
+                    if !already_present {
+                        self.song_history.add_row_and_save(record);
+                    }
                 }
+                GUIMessage::WipeSongHistory => {
+                    self.song_history.wipe_and_save();
+                }
+                GUIMessage::AppendToLog(text) => {
+                    self.log_text.push_str(&text);
+                    if self.log_text.len() > 100_000 {
+                        self.log_text =
+                            self.log_text[self.log_text.len() - 80_000..].to_string();
+                    }
+                }
+                GUIMessage::UpdatePreference(prefs) => {
+                    self.preferences_interface.update(prefs);
+                }
+                GUIMessage::ShowWindow | GUIMessage::QuitApplication => {}
             }
-        });
+        }
     }
+}
 
-    fn setup_actions(&self, application: &adw::Application, _enable_mpris_cli: bool) {
-        let window: adw::ApplicationWindow = self.builder.object("main_window").unwrap();
-        let file_picker: gtk::FileDialog = self.builder.object("file_picker").unwrap();
-        let about_dialog: adw::AboutDialog = self.builder.object("about_dialog").unwrap();
-        let results_label: gtk::Label = self.builder.object("results_label").unwrap();
-        let recognize_file_row: adw::PreferencesRow =
-            self.builder.object("recognize_file_row").unwrap();
-        let spinner_row: adw::PreferencesRow = self.builder.object("spinner_row").unwrap();
+impl eframe::App for SongRecApp {
+    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.process_messages(ctx);
+        ctx.request_repaint_after(Duration::from_millis(100));
 
-        let ctx_buffered_log = self.ctx_buffered_log.clone();
-        let ctx_logger_source_id = self.ctx_logger_source_id.clone();
-
-        let action_show_about = gio::ActionEntry::builder("show-about")
-            .activate(move |window, _, _| {
-                about_dialog.set_visible(true);
-                about_dialog.set_version(env!("CARGO_PKG_VERSION"));
-                about_dialog.present(Some(window));
-
-                about_dialog.set_debug_info(&*ctx_buffered_log.borrow());
-
-                // Sync the debug info with the About modal at most every
-                // 1 sec as it may require a lot of text rendering power
-                // each time
-
-                let ctx_buffered_log = ctx_buffered_log.clone();
-                let ctx_logger_source_id_2 = ctx_logger_source_id.clone();
-                let about_dialog = about_dialog.clone();
-
-                if *ctx_logger_source_id.borrow() == None {
-                    *ctx_logger_source_id.borrow_mut() =
-                        Some(glib::source::timeout_add_seconds_local(1, move || {
-                            if about_dialog.is_visible() {
-                                about_dialog.set_debug_info(&*ctx_buffered_log.borrow());
-                                glib::ControlFlow::Continue
-                            } else {
-                                *ctx_logger_source_id_2.borrow_mut() = None;
-                                glib::ControlFlow::Break
-                            }
-                        }));
-                }
-            })
-            .build();
-
-        let processing_tx = self.processing_tx.clone();
-
-        let action_recognize_file = gio::ActionEntry::builder("recognize-file")
-            .activate(move |window, _action, _obj| {
-                // Call a XDG file picker here
-
-                let processing_tx = processing_tx.clone();
-
-                let window: &adw::ApplicationWindow = window;
-                let recognize_file_row = recognize_file_row.clone();
-                let spinner_row = spinner_row.clone();
-
-                file_picker.open(
-                    Some(window),
-                    None::<&gio::Cancellable>,
-                    move |file| match file {
-                        Ok(gio_file) => {
-                            info!("Picked file: {:?}", gio_file.path());
-                            let path_str = gio_file.path().unwrap().to_string_lossy().into_owned();
-
-                            recognize_file_row.set_sensitive(false);
-                            spinner_row.set_visible(true);
-
-                            processing_tx
-                                .try_send(ProcessingMessage::ProcessAudioFile(path_str))
-                                .unwrap();
-                        }
-                        Err(error) => {
-                            error!("Error picking file: {:?}", error);
-                        }
-                    },
-                );
-            })
-            .build();
-
-        let action_search_youtube = gio::ActionEntry::builder("search-youtube")
-            .activate(move |window: &adw::ApplicationWindow, _, _| {
-                let window = window.clone();
-
-                let results_label = results_label.text();
-
-                let mut encoded_search_term =
-                    utf8_percent_encode(results_label.as_str(), NON_ALPHANUMERIC).to_string();
-                encoded_search_term = encoded_search_term.replace("%20", "+");
-
-                let search_url = format!(
-                    "https://www.youtube.com/results?search_query={}",
-                    encoded_search_term
-                );
-
-                glib::spawn_future_local(async move {
-                    info!("Launching URL: {}", search_url);
-                    if let Err(err) = gtk::UriLauncher::new(&search_url)
-                        .launch_future(Some(&window))
-                        .await
-                    {
-                        error!("Could not launch URL {}: {:?}", search_url, err);
+        // ── About dialog ──────────────────────────────────────────────────
+        if self.show_about {
+            egui::Window::new("About SongRec")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.heading("SongRec");
+                    ui.label(
+                        "An open-source Shazam client for Linux, written in Rust.",
+                    );
+                    ui.hyperlink("https://github.com/marin-m/SongRec");
+                    ui.add_space(8.0);
+                    if ui.button("Close").clicked() {
+                        self.show_about = false;
                     }
                 });
-            })
-            .build();
+        }
 
-        let action_close = gio::ActionEntry::builder("close")
-            .activate(move |window: &adw::ApplicationWindow, _, _| {
-                window.close();
-            })
-            .build();
+        // ── Preferences dialog ────────────────────────────────────────────
+        if self.show_preferences {
+            let mut show = true;
+            egui::Window::new("Preferences")
+                .open(&mut show)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    let prefs = &mut self.preferences_interface.preferences;
 
-        let microphone_tx = self.microphone_tx.clone();
+                    let mut notifications = prefs.enable_notifications.unwrap_or(true);
+                    if ui
+                        .checkbox(&mut notifications, "Enable notifications")
+                        .changed()
+                    {
+                        prefs.enable_notifications = Some(notifications);
+                    }
 
-        let action_refresh_devices = gio::ActionEntry::builder("refresh-devices")
-            .activate(move |_, _, _| {
-                microphone_tx
-                    .try_send(MicrophoneMessage::RefreshDevices)
-                    .unwrap();
-            })
-            .build();
+                    let mut no_dup = prefs.no_duplicates.unwrap_or(false);
+                    if ui
+                        .checkbox(&mut no_dup, "Suppress duplicate entries")
+                        .changed()
+                    {
+                        prefs.no_duplicates = Some(no_dup);
+                    }
 
-        window.add_action_entries([
-            action_show_about,
-            action_recognize_file,
-            action_search_youtube,
-            action_refresh_devices,
-            action_close,
-        ]);
+                    let mut buf_size = prefs.buffer_size_secs.unwrap_or(12) as f64;
+                    ui.add(
+                        egui::Slider::new(&mut buf_size, 1.0..=60.0)
+                            .text("Buffer size (s)")
+                            .integer(),
+                    );
+                    prefs.buffer_size_secs = Some(buf_size as u64);
 
-        // GDK key names are available here:
-        // https://gitlab.gnome.org/GNOME/gtk/-/blob/main/gdk/gdkkeysyms.h
+                    let mut interval = prefs.request_interval_secs_v3.unwrap_or(8) as f64;
+                    ui.add(
+                        egui::Slider::new(&mut interval, 1.0..=60.0)
+                            .text("Request interval (s)")
+                            .integer(),
+                    );
+                    prefs.request_interval_secs_v3 = Some(interval as u64);
 
-        application.set_accels_for_action("win.close", &["<Primary>Q", "<Primary>W"]);
-        application.set_accels_for_action("win.recognize-file", &["<Primary>O"]);
-    }
+                    ui.add_space(8.0);
+                    if ui.button("Save").clicked() {
+                        let updated = prefs.clone();
+                        self.preferences_interface.update(updated);
+                        self.show_preferences = false;
+                    }
+                });
+            if !show {
+                self.show_preferences = false;
+            }
+        }
 
-    fn show_window(&self, application: &adw::Application) {
-        let window: adw::ApplicationWindow = self.builder.object("main_window").unwrap();
-        window.set_application(Some(application));
+        // ── Top toolbar ───────────────────────────────────────────────────
+        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("🎵 SongRec");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("About").clicked() {
+                        self.show_about = true;
+                    }
+                    if ui.button("⚙ Preferences").clicked() {
+                        self.show_preferences = true;
+                    }
+                    if self.rate_limited {
+                        ui.colored_label(egui::Color32::YELLOW, "⚠ Rate limited");
+                    } else if !self.network_ok {
+                        ui.colored_label(egui::Color32::RED, "✗ No network");
+                    } else {
+                        ui.colored_label(egui::Color32::GREEN, "✓ Online");
+                    }
+                });
+            });
+        });
 
-        window.present();
+        // ── Left panel ────────────────────────────────────────────────────
+        egui::SidePanel::left("controls")
+            .min_width(260.0)
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+
+                ui.label("Audio device:");
+                egui::ComboBox::from_id_salt("device_combo")
+                    .selected_text(
+                        self.audio_devices
+                            .get(self.selected_device_idx)
+                            .map(|d| d.display_name.as_str())
+                            .unwrap_or("(no devices)"),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (i, dev) in self.audio_devices.iter().enumerate() {
+                            ui.selectable_value(
+                                &mut self.selected_device_idx,
+                                i,
+                                &dev.display_name,
+                            );
+                        }
+                    });
+
+                ui.add_space(6.0);
+
+                let mic_label = if self.microphone_active {
+                    "⏹ Stop microphone"
+                } else {
+                    "🎙 Start microphone"
+                };
+                if ui.button(mic_label).clicked() {
+                    if self.microphone_active {
+                        self.microphone_active = false;
+                        self.loopback_active = false;
+                        self.stop_microphone();
+                    } else {
+                        self.loopback_active = false;
+                        self.microphone_active = true;
+                        self.start_microphone();
+                    }
+                }
+
+                let loop_label = if self.loopback_active {
+                    "⏹ Stop loopback"
+                } else {
+                    "🔊 Start loopback"
+                };
+                if ui.button(loop_label).clicked() {
+                    if self.loopback_active {
+                        self.loopback_active = false;
+                        self.microphone_active = false;
+                        self.stop_microphone();
+                    } else if let Some((idx, dev)) = self
+                        .audio_devices
+                        .iter()
+                        .enumerate()
+                        .find(|(_, d)| d.is_monitor)
+                    {
+                        self.selected_device_idx = idx;
+                        self.loopback_active = true;
+                        self.microphone_active = false;
+                        self.microphone_tx
+                            .try_send(MicrophoneMessage::MicrophoneRecordStart(
+                                dev.inner_name.clone(),
+                            ))
+                            .ok();
+                    } else {
+                        self.status_message = "No loopback/monitor device found".to_string();
+                    }
+                }
+
+                if ui.button("📂 Recognise from file…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter(
+                            "Audio",
+                            &["wav", "mp3", "flac", "ogg", "m4a", "aac"],
+                        )
+                        .pick_file()
+                    {
+                        let path_str = path.to_string_lossy().to_string();
+                        self.processing_tx
+                            .try_send(ProcessingMessage::ProcessAudioFile(path_str))
+                            .ok();
+                    }
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+
+                ui.label(egui::RichText::new("Status:").small());
+                ui.label(&self.status_message);
+
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Volume:").small());
+                ui.add(
+                    egui::ProgressBar::new(self.volume_percent / 100.0)
+                        .desired_width(220.0)
+                        .animate(self.microphone_active || self.loopback_active),
+                );
+
+                ui.add_space(8.0);
+                ui.separator();
+
+                if !self.current_song.is_empty() {
+                    if let Some(ref tex) = self.cover_texture {
+                        let size = egui::vec2(160.0, 160.0);
+                        ui.image(egui::load::SizedTexture::new(tex.id(), size));
+                    }
+                    ui.label(egui::RichText::new(&self.current_song).strong().size(15.0));
+                    ui.label(egui::RichText::new(&self.current_artist).size(13.0));
+                    if !self.current_album.is_empty() {
+                        ui.label(
+                            egui::RichText::new(&self.current_album)
+                                .italics()
+                                .size(12.0),
+                        );
+                    }
+                    let artist = self.current_artist.clone();
+                    let song = self.current_song.clone();
+                    if ui.button("▶ Open in YouTube").clicked() {
+                        Self::open_in_browser(&artist, &song);
+                    }
+                } else {
+                    ui.label("No song recognised yet.");
+                }
+
+                ui.add_space(8.0);
+                if ui.button("🗑 Clear history").clicked() {
+                    self.song_history.wipe_and_save();
+                }
+            });
+
+        // ── Central panel: song history ───────────────────────────────────
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Recognition history");
+            ui.add_space(4.0);
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Grid::new("history_grid")
+                    .num_columns(3)
+                    .striped(true)
+                    .min_col_width(100.0)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Date").strong());
+                        ui.label(egui::RichText::new("Song").strong());
+                        ui.label(egui::RichText::new("Album").strong());
+                        ui.end_row();
+
+                        let records_snapshot: Vec<SongHistoryRecord> =
+                            self.song_history.records.clone();
+
+                        for record in &records_snapshot {
+                            let date_label = ui.label(&record.recognition_date);
+                            let song_label = ui.label(&record.song_name);
+                            let album_text = record.album.as_deref().unwrap_or("");
+                            let album_label = ui.label(album_text);
+
+                            let row_response = date_label | song_label | album_label;
+                            row_response.context_menu(|ui| {
+                                let parts: Vec<&str> =
+                                    record.song_name.splitn(2, " — ").collect();
+                                let (artist, song_title) = if parts.len() == 2 {
+                                    (parts[0], parts[1])
+                                } else {
+                                    ("", record.song_name.as_str())
+                                };
+
+                                if ui.button("▶ Open in YouTube").clicked() {
+                                    Self::open_in_browser(artist, song_title);
+                                    ui.close_menu();
+                                }
+                                if ui.button("🗑 Remove entry").clicked() {
+                                    self.song_history.remove(record);
+                                    ui.close_menu();
+                                }
+                            });
+
+                            ui.end_row();
+                        }
+                    });
+            });
+        });
     }
 }

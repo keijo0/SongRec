@@ -1,7 +1,7 @@
 use gettextrs::gettext;
 use regex::Regex;
+use reqwest::Client;
 use serde_json::{to_string_pretty, Value};
-use soup::prelude::SessionExt;
 use std::error::Error;
 
 use crate::core::thread_messages::*;
@@ -12,15 +12,13 @@ use crate::core::fingerprinting::communication::{
 use crate::core::fingerprinting::signature_format::DecodedSignature;
 
 async fn try_recognize_song(
-    session: &soup::Session,
+    client: &Client,
     signature: DecodedSignature,
-) -> Result<SongRecognizedMessage, Box<dyn Error>> {
-    let json_object = recognize_song_from_signature(session, &signature).await?;
+) -> Result<SongRecognizedMessage, Box<dyn Error + Send + Sync>> {
+    let json_object = recognize_song_from_signature(client, &signature).await?;
 
     let mut album_name: Option<String> = None;
     let mut release_year: Option<String> = None;
-
-    // Sometimes the idea of trying to write functional poetry hurts
 
     if let Value::Array(sections) = &json_object["track"]["sections"] {
         for section in sections {
@@ -68,7 +66,9 @@ async fn try_recognize_song(
             }
         },
         cover_image: match &json_object["track"]["images"]["coverart"] {
-            Value::String(string) => Some(obtain_raw_cover_image(session.clone(), string).await?),
+            Value::String(string) => {
+                Some(obtain_raw_cover_image(client, string).await?)
+            }
             _ => None,
         },
         track_key: match &json_object["track"]["key"] {
@@ -103,15 +103,15 @@ pub async fn http_task(
     gui_tx: async_channel::Sender<GUIMessage>,
     microphone_tx: async_channel::Sender<MicrophoneMessage>,
 ) {
-    let session = soup::Session::new();
-    session.set_timeout(20);
-    session.set_idle_timeout(2);
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .expect("Failed to build reqwest client");
 
     while let Ok(message) = http_rx.recv().await {
-        // XX USE SOUP3 CF. https://github.com/marin-m/SongRec/issues/223
         match message {
             HTTPMessage::RecognizeSignature(signature) => {
-                match try_recognize_song(&session, *signature).await {
+                match try_recognize_song(&client, *signature).await {
                     Ok(recognized_song) => {
                         gui_tx
                             .try_send(GUIMessage::SongRecognized(Box::new(recognized_song)))

@@ -1,9 +1,6 @@
 #[cfg(feature = "gui")]
 use crate::core::thread_messages::GUIMessage;
-use glib::{LogLevel, LogWriterOutput};
-use log::Level;
 use std::boxed::Box;
-use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
@@ -110,52 +107,6 @@ impl Logging {
     }
 
     pub fn bind_glib_logging() {
-        // Handle structured GLib logging and route it to the `log` crate
-
-        glib::log_set_writer_func(|level, log_fields| {
-            // Use: https://docs.rs/log/0.4.27/log/struct.Record.html
-            // https://docs.rs/log/0.4.27/log/struct.RecordBuilder.html
-            // https://docs.rs/log/0.4.27/log/fn.logger.html + https://docs.rs/log/0.4.27/log/trait.Log.html#tymethod.log
-
-            let mut fields: HashMap<String, String> = HashMap::new();
-
-            for field in log_fields {
-                if let Some(value) = field.value_str() {
-                    fields.insert(field.key().to_string(), value.to_string());
-                }
-            }
-
-            let log_level = match level {
-                LogLevel::Critical => Level::Error,
-                LogLevel::Error => Level::Error,
-                LogLevel::Warning => Level::Warn,
-                LogLevel::Message => Level::Info,
-                LogLevel::Info => Level::Info,
-                LogLevel::Debug => Level::Debug,
-            };
-
-            let message = fields.get("MESSAGE").map_or("??", |v| v);
-            log::logger().log(
-                &log::Record::builder()
-                    .args(format_args!("{}", message))
-                    .level(log_level)
-                    .target(fields.get("GLIB_DOMAIN").map_or("Glib", |v| v))
-                    .file(fields.get("CODE_FILE").map(|x| x.as_str()))
-                    .line(
-                        fields
-                            .get("CODE_LINE")
-                            .map(|x| x.parse::<u32>().unwrap_or(0)),
-                    )
-                    .module_path(fields.get("GLIB_DOMAIN").map(|x| x.as_str()))
-                    .key_values(&fields)
-                    .build(),
-            );
-
-            LogWriterOutput::Handled
-        });
-
-        // Handle unstructured logging
-
-        glib::log_set_default_handler(glib::rust_log_handler);
+        // No-op: glib logging integration removed in favour of reqwest/tokio stack
     }
 }

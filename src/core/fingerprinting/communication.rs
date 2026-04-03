@@ -1,8 +1,7 @@
 use gettextrs::gettext;
-use glib::source::Priority;
 use rand::prelude::IndexedRandom;
+use reqwest::Client;
 use serde_json::{json, Value};
-use soup::prelude::SessionExt;
 use std::error::Error;
 use std::time::SystemTime;
 use uuid::Uuid;
@@ -11,10 +10,10 @@ use crate::core::fingerprinting::signature_format::DecodedSignature;
 use crate::core::fingerprinting::user_agent::USER_AGENTS;
 
 pub async fn recognize_song_from_signature(
-    session: &soup::Session,
+    client: &Client,
     signature: &DecodedSignature,
-) -> Result<Value, Box<dyn Error>> {
-    session.set_user_agent(USER_AGENTS.choose(&mut rand::rng()).unwrap());
+) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    let user_agent = USER_AGENTS.choose(&mut rand::rng()).unwrap();
 
     let timestamp_ms = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)?
@@ -29,11 +28,12 @@ pub async fn recognize_song_from_signature(
         "signature": {
             "samplems": (signature.number_samples as f32 / signature.sample_rate_hz as f32 * 1000.) as u32,
             "timestamp": timestamp_ms as u32,
-            "uri": signature.encode_to_uri()?
+            "uri": signature.encode_to_uri().map_err(|e| e.to_string())?
         },
         "timestamp": timestamp_ms as u32,
         "timezone": "Europe/Paris"
-    }).to_string();
+    })
+    .to_string();
 
     let uuid_1 = Uuid::new_v4().hyphenated().to_string().to_uppercase();
     let uuid_2 = Uuid::new_v4().hyphenated().to_string();
@@ -50,38 +50,38 @@ pub async fn recognize_song_from_signature(
         uuid_1, uuid_2
     );
 
-    let message = soup::Message::from_encoded_form("POST", &url, post_data.into())?;
-
-    let headers = message.request_headers().unwrap();
-    headers.append("Content-Language", "en_US");
-    headers.set_content_type(Some("application/json"), None);
-
-    let response = session
-        .send_and_read_future(&message, Priority::DEFAULT)
+    let response = client
+        .post(&url)
+        .header("Content-Language", "en_US")
+        .header("Content-Type", "application/json")
+        .header("User-Agent", *user_agent)
+        .body(post_data)
+        .send()
         .await?;
 
-    if message.status_code() == 429 {
+    if response.status().as_u16() == 429 {
         return Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::QuotaExceeded,
             gettext("Your IP has been rate-limited").as_str(),
         )));
     }
 
-    Ok(serde_json::from_slice(&response[..])?)
+    let bytes = response.bytes().await?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 pub async fn obtain_raw_cover_image(
-    session: soup::Session,
+    client: &Client,
     url: &str,
-) -> Result<Vec<u8>, Box<dyn Error>> {
-    let message = soup::Message::new("GET", url)?;
-    session.set_user_agent(USER_AGENTS.choose(&mut rand::rng()).unwrap());
-    let headers = message.request_headers().unwrap();
-    headers.append("Content-Language", "en_US");
+) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+    let user_agent = USER_AGENTS.choose(&mut rand::rng()).unwrap();
 
-    let response = session
-        .send_and_read_future(&message, Priority::DEFAULT)
+    let response = client
+        .get(url)
+        .header("Content-Language", "en_US")
+        .header("User-Agent", *user_agent)
+        .send()
         .await?;
 
-    Ok(response[..].to_vec())
+    Ok(response.bytes().await?.to_vec())
 }
