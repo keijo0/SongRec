@@ -103,8 +103,15 @@ pub async fn http_task(
     gui_tx: async_channel::Sender<GUIMessage>,
     microphone_tx: async_channel::Sender<MicrophoneMessage>,
 ) {
+    // Use HTTP/1.1 and a short idle timeout to match the old libsoup3 behaviour
+    // (soup::Session::set_idle_timeout(2)).  With the default settings reqwest
+    // negotiates HTTP/2 and keeps connections alive indefinitely, which lets
+    // Shazam trivially count requests per session and rate-limit much more
+    // aggressively than it did against HTTP/1.1 with short-lived connections.
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(20))
+        .http1_only()
+        .pool_idle_timeout(std::time::Duration::from_secs(2))
         .build()
         .expect("Failed to build reqwest client");
 
