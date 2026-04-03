@@ -44,7 +44,6 @@ struct SongRecApp {
     audio_devices: Vec<DeviceListItem>,
     selected_device_idx: usize,
     microphone_active: bool,
-    loopback_active: bool,
 
     status_message: String,
     volume_percent: f32,
@@ -120,7 +119,6 @@ impl SongRecApp {
             audio_devices: Vec::new(),
             selected_device_idx: 0,
             microphone_active: recording,
-            loopback_active: false,
             status_message: String::from("Idle"),
             volume_percent: 0.0,
             network_ok: true,
@@ -366,49 +364,18 @@ impl eframe::App for SongRecApp {
 
                 ui.add_space(6.0);
 
-                let mic_label = if self.microphone_active {
-                    "⏹ Stop microphone"
+                let rec_label = if self.microphone_active {
+                    "⏹ Stop"
                 } else {
-                    "🎙 Start microphone"
+                    "▶ Start"
                 };
-                if ui.button(mic_label).clicked() {
+                if ui.button(rec_label).clicked() {
                     if self.microphone_active {
                         self.microphone_active = false;
-                        self.loopback_active = false;
                         self.stop_microphone();
                     } else {
-                        self.loopback_active = false;
                         self.microphone_active = true;
                         self.start_microphone();
-                    }
-                }
-
-                let loop_label = if self.loopback_active {
-                    "⏹ Stop loopback"
-                } else {
-                    "🔊 Start loopback"
-                };
-                if ui.button(loop_label).clicked() {
-                    if self.loopback_active {
-                        self.loopback_active = false;
-                        self.microphone_active = false;
-                        self.stop_microphone();
-                    } else if let Some((idx, dev)) = self
-                        .audio_devices
-                        .iter()
-                        .enumerate()
-                        .find(|(_, d)| d.is_monitor)
-                    {
-                        self.selected_device_idx = idx;
-                        self.loopback_active = true;
-                        self.microphone_active = false;
-                        self.microphone_tx
-                            .try_send(MicrophoneMessage::MicrophoneRecordStart(
-                                dev.inner_name.clone(),
-                            ))
-                            .ok();
-                    } else {
-                        self.status_message = "No loopback/monitor device found".to_string();
                     }
                 }
 
@@ -438,7 +405,7 @@ impl eframe::App for SongRecApp {
                 ui.add(
                     egui::ProgressBar::new(self.volume_percent / 100.0)
                         .desired_width(220.0)
-                        .animate(self.microphone_active || self.loopback_active),
+                        .animate(self.microphone_active),
                 );
 
                 ui.add_space(8.0);
