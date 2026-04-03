@@ -38,7 +38,7 @@ tempfile = "3.24.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # GUI deps
-eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"], optional = true }
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "x11"], optional = true }
 egui = { version = "0.29", optional = true }
 percent-encoding = { version = "2.1.0", optional = true } # For percent-encoding contents in URLs
 webbrowser = { version = "1.0", optional = true } # For opening URLs in the browser

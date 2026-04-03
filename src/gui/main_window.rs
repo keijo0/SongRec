@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::core::microphone_thread::microphone_thread;
-use crate::core::preferences::{Preferences, PreferencesInterface};
+use crate::core::preferences::PreferencesInterface;
 use crate::core::processing_thread::processing_thread;
 use crate::core::http_task::http_task;
 use crate::core::thread_messages::{
