@@ -24,21 +24,6 @@ pub struct Preferences {
 }
 
 impl Preferences {
-    pub fn new() -> Self {
-        Preferences {
-            enable_notifications: None,
-            enable_systray: None,
-            enable_mpris: None,
-            enable_mpris_v2: None,
-            no_duplicates: None,
-            buffer_size_secs: None,
-            request_interval_secs: None,
-            request_interval_secs_v2: None,
-            request_interval_secs_v3: None,
-            current_device_name: None,
-        }
-    }
-
     pub fn with_interval(interval: u64) -> Self {
         Preferences {
             enable_notifications: Some(true),

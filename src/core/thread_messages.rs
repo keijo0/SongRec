@@ -1,6 +1,4 @@
 use crate::core::fingerprinting::signature_format::DecodedSignature;
-#[cfg(feature = "gui")]
-use crate::core::preferences::Preferences;
 
 use std::thread;
 
@@ -51,12 +49,8 @@ pub enum GUIMessage {
     // because CPAL can't be called from the same thread as the GUI
     // under Windows
     DevicesList(Box<Vec<DeviceListItem>>),
-    #[cfg(feature = "gui")]
-    UpdatePreference(Preferences),
     NetworkStatus(bool),  // Is the network reachable?
     RateLimitState(bool), // Are we rate-limited?
-    #[cfg(feature = "gui")]
-    WipeSongHistory,
     #[cfg(feature = "gui")]
     AppendToLog(String),
     MicrophoneRecording,
@@ -67,7 +61,6 @@ pub enum GUIMessage {
 pub enum MicrophoneMessage {
     MicrophoneRecordStart(String), // The argument is the audio device name
     MicrophoneRecordSetDevice(String), // The argument is the audio device name (with an initialization delay)
-    RefreshDevices,
     MicrophoneRecordStop,
     ProcessingDone,
 }

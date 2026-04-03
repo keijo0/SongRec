@@ -240,18 +240,12 @@ impl SongRecApp {
                         self.song_history.add_row_and_save(record);
                     }
                 }
-                GUIMessage::WipeSongHistory => {
-                    self.song_history.wipe_and_save();
-                }
                 GUIMessage::AppendToLog(text) => {
                     self.log_text.push_str(&text);
                     if self.log_text.len() > 100_000 {
                         self.log_text =
                             self.log_text[self.log_text.len() - 80_000..].to_string();
                     }
-                }
-                GUIMessage::UpdatePreference(prefs) => {
-                    self.preferences_interface.update(prefs);
                 }
                 GUIMessage::ShowWindow | GUIMessage::QuitApplication => {}
             }
