@@ -2,7 +2,7 @@
 /// format defined within the "src/utils/csv_song_history.rs" file, the
 /// GTK-rs GUI of SongRec and the filesystem while using the GUI.
 use crate::gui::history_entry::HistoryEntry;
-use crate::utils::csv_song_history::{Song, SongHistoryRecord};
+use crate::utils::csv_song_history::{HasSong, Song, SongHistoryRecord};
 use gettextrs::gettext;
 use gtk::prelude::*;
 use log::error;
