@@ -99,7 +99,7 @@ impl ContextMenuUtil {
                         popover_menu.unparent();
                         popover_menu.set_has_arrow(false);
                         popover_menu.set_parent(&column_view);
-                        popover_menu.set_pointing_to(Some(&Rectangle::new(0, 0, 1, 1)));
+                        popover_menu.set_pointing_to(Some(&Rectangle::new(0, 0, 1, 1))); // top-left corner when using keyboard
                         popover_menu.popup();
                     }
                     Propagation::Stop
