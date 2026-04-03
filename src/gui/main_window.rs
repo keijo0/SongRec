@@ -172,7 +172,7 @@ impl SongRecApp {
                     }
                 }
                 GUIMessage::MicrophoneRecording => {
-                    self.status_message = "Recording…".to_string();
+                    self.status_message = "Recording...".to_string();
                 }
                 GUIMessage::MicrophoneVolumePercent(v) => {
                     self.volume_percent = v;
@@ -186,7 +186,7 @@ impl SongRecApp {
                 GUIMessage::RateLimitState(limited) => {
                     self.rate_limited = limited;
                     if limited {
-                        self.status_message = "Rate limited — waiting…".to_string();
+                        self.status_message = "Rate limited - waiting...".to_string();
                     }
                 }
                 GUIMessage::ErrorMessage(e) => {
@@ -196,7 +196,7 @@ impl SongRecApp {
                     self.current_artist = msg.artist_name.clone();
                     self.current_song = msg.song_name.clone();
                     self.current_album = msg.album_name.clone().unwrap_or_default();
-                    self.status_message = format!("{} — {}", msg.artist_name, msg.song_name);
+                    self.status_message = format!("{} - {}", msg.artist_name, msg.song_name);
 
                     if let Some(ref bytes) = msg.cover_image {
                         if let Ok(img) = image::load_from_memory(bytes) {
@@ -213,7 +213,7 @@ impl SongRecApp {
                     }
 
                     let record = SongHistoryRecord {
-                        song_name: format!("{} — {}", msg.artist_name, msg.song_name),
+                        song_name: format!("{} - {}", msg.artist_name, msg.song_name),
                         album: msg.album_name.clone(),
                         track_key: Some(msg.track_key.clone()),
                         release_year: msg.release_year.clone(),
@@ -319,20 +319,20 @@ impl eframe::App for SongRecApp {
         // ── Top toolbar ───────────────────────────────────────────────────
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("🎵 SongRec");
+                ui.heading("SongRec");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("About").clicked() {
                         self.show_about = true;
                     }
-                    if ui.button("⚙ Preferences").clicked() {
+                    if ui.button("Preferences").clicked() {
                         self.show_preferences = true;
                     }
                     if self.rate_limited {
-                        ui.colored_label(egui::Color32::YELLOW, "⚠ Rate limited");
+                        ui.colored_label(egui::Color32::YELLOW, "Rate limited");
                     } else if !self.network_ok {
-                        ui.colored_label(egui::Color32::RED, "✗ No network");
+                        ui.colored_label(egui::Color32::RED, "No network");
                     } else {
-                        ui.colored_label(egui::Color32::GREEN, "✓ Online");
+                        ui.colored_label(egui::Color32::GREEN, "Online");
                     }
                 });
             });
@@ -365,9 +365,9 @@ impl eframe::App for SongRecApp {
                 ui.add_space(6.0);
 
                 let rec_label = if self.microphone_active {
-                    "⏹ Stop"
+                    "Stop"
                 } else {
-                    "▶ Start"
+                    "Start"
                 };
                 if ui.button(rec_label).clicked() {
                     if self.microphone_active {
@@ -379,7 +379,7 @@ impl eframe::App for SongRecApp {
                     }
                 }
 
-                if ui.button("📂 Recognise from file…").clicked() {
+                if ui.button("Recognise from file...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter(
                             "Audio",
@@ -427,7 +427,7 @@ impl eframe::App for SongRecApp {
                     }
                     let artist = self.current_artist.clone();
                     let song = self.current_song.clone();
-                    if ui.button("▶ Open in YouTube").clicked() {
+                    if ui.button("Open in YouTube").clicked() {
                         Self::open_in_browser(&artist, &song);
                     }
                 } else {
@@ -435,7 +435,7 @@ impl eframe::App for SongRecApp {
                 }
 
                 ui.add_space(8.0);
-                if ui.button("🗑 Clear history").clicked() {
+                if ui.button("Clear history").clicked() {
                     self.song_history.wipe_and_save();
                 }
             });
@@ -468,18 +468,18 @@ impl eframe::App for SongRecApp {
                             let row_response = date_label | song_label | album_label;
                             row_response.context_menu(|ui| {
                                 let parts: Vec<&str> =
-                                    record.song_name.splitn(2, " — ").collect();
+                                    record.song_name.splitn(2, " - ").collect();
                                 let (artist, song_title) = if parts.len() == 2 {
                                     (parts[0], parts[1])
                                 } else {
                                     ("", record.song_name.as_str())
                                 };
 
-                                if ui.button("▶ Open in YouTube").clicked() {
+                                if ui.button("Open in YouTube").clicked() {
                                     Self::open_in_browser(artist, song_title);
                                     ui.close_menu();
                                 }
-                                if ui.button("🗑 Remove entry").clicked() {
+                                if ui.button("Remove entry").clicked() {
                                     self.song_history.remove(record);
                                     ui.close_menu();
                                 }
