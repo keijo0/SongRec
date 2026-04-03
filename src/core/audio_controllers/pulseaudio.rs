@@ -63,7 +63,6 @@ impl PulseBackend {
 impl AudioBackend for PulseBackend {
     fn list_devices(&mut self, _host: &Host) -> Vec<DeviceListItem> {
         let mut device_names: Vec<DeviceListItem> = vec![];
-        let mut monitor_device_names: Vec<DeviceListItem> = vec![];
 
         match self.handler.get_server_info() {
             Ok(info) => match self.handler.list_devices() {
@@ -71,26 +70,21 @@ impl AudioBackend for PulseBackend {
                     for dev in devices {
                         if let Some(desc) = &dev.description {
                             if let Some(name) = &dev.name {
+                                let is_monitor = dev.monitor != None;
                                 if &dev.name == &info.default_source_name {
                                     device_names.insert(
                                         0,
                                         DeviceListItem {
                                             inner_name: name.to_string(),
                                             display_name: desc.to_string(),
-                                            is_monitor: dev.monitor != None,
+                                            is_monitor,
                                         },
                                     );
-                                } else if dev.monitor != None {
-                                    monitor_device_names.push(DeviceListItem {
-                                        inner_name: name.to_string(),
-                                        display_name: desc.to_string(),
-                                        is_monitor: true,
-                                    });
                                 } else {
                                     device_names.push(DeviceListItem {
                                         inner_name: name.to_string(),
                                         display_name: desc.to_string(),
-                                        is_monitor: false,
+                                        is_monitor,
                                     });
                                 }
                             }
@@ -106,7 +100,6 @@ impl AudioBackend for PulseBackend {
             }
         }
 
-        device_names.extend(monitor_device_names);
         device_names
     }
 

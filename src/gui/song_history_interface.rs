@@ -2,11 +2,10 @@
 /// format defined within the "src/utils/csv_song_history.rs" file, the
 /// GTK-rs GUI of SongRec and the filesystem while using the GUI.
 use crate::gui::history_entry::HistoryEntry;
-use crate::utils::csv_song_history::{HasSong, Song, SongHistoryRecord};
+use crate::utils::csv_song_history::{Song, SongHistoryRecord};
 use gettextrs::gettext;
 use gtk::prelude::*;
 use log::error;
-use std::collections::HashSet;
 use std::error::Error;
 
 trait SongHistoryRecordListStore {
@@ -45,12 +44,6 @@ impl SongHistoryRecordListStore for gio::ListStore {
 pub struct RecognitionHistoryInterface {
     csv_path: String,
     list_store: gio::ListStore,
-}
-#[derive(Debug, Clone)]
-pub struct FavoritesInterface {
-    csv_path: String,
-    list_store: gio::ListStore,
-    is_favorite: HashSet<Song>,
 }
 
 pub trait SongRecordInterface {
@@ -149,82 +142,5 @@ impl SongRecordInterface for RecognitionHistoryInterface {
     fn remove(self: &mut Self, song_record: SongHistoryRecord) {
         self.list_store.remove_song_history_record(song_record);
         self.save()
-    }
-}
-
-impl SongRecordInterface for FavoritesInterface {
-    fn new(
-        list_store: gio::ListStore,
-        get_csv_path: fn() -> Result<String, Box<dyn Error>>,
-    ) -> Result<Self, Box<dyn Error>> {
-        let mut interface = FavoritesInterface {
-            csv_path: get_csv_path()?,
-            list_store,
-            is_favorite: HashSet::<Song>::new(),
-        };
-
-        if let Err(error_info) = interface.load() {
-            error!(
-                "{} {}",
-                gettext("Error when reading the favorites on the disk:"),
-                error_info
-            );
-        }
-
-        Ok(interface)
-    }
-
-    fn load(self: &mut Self) -> Result<(), Box<dyn Error>> {
-        match csv::ReaderBuilder::new()
-            .flexible(true)
-            .from_path(&self.csv_path)
-        {
-            Ok(mut reader) => {
-                for result in reader.deserialize() {
-                    let record = result?;
-                    self.list_store.add_song_history_record(&record);
-                    self.is_favorite.insert(record.get_song());
-                }
-            }
-            _ => {} // File does not exists, ignore
-        };
-        Ok(())
-    }
-
-    fn wipe_and_save(self: &mut Self) {
-        self.list_store.remove_all();
-        self.is_favorite.clear();
-        let mut writer = csv::Writer::from_path(&self.csv_path).unwrap();
-
-        writer.flush().unwrap();
-    }
-
-    fn add_row_and_save(self: &mut Self, record: SongHistoryRecord) {
-        self.list_store.add_song_history_record(&record);
-        self.is_favorite.insert(record.get_song());
-        self.save();
-    }
-
-    fn save(self: &mut Self) {
-        let mut writer = csv::Writer::from_path(&self.csv_path).unwrap();
-
-        for item in self.list_store.iter::<glib::Object>() {
-            let item = item.unwrap().downcast::<HistoryEntry>().unwrap();
-            writer.serialize(item.get_song_history_record()).unwrap();
-        }
-        writer.flush().unwrap();
-    }
-
-    fn remove(self: &mut Self, song_record: SongHistoryRecord) {
-        let song = song_record.get_song();
-        self.is_favorite.remove(&song);
-        self.list_store.remove_song(song);
-        self.save()
-    }
-}
-
-impl FavoritesInterface {
-    pub fn is_favorite<T: HasSong>(&self, has_song: T) -> bool {
-        self.is_favorite.contains(&has_song.get_song())
     }
 }

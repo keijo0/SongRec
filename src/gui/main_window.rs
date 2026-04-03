@@ -17,8 +17,6 @@ use crate::core::microphone_thread::microphone_thread;
 use crate::core::processing_thread::processing_thread;
 use crate::core::thread_messages::{GUIMessage::*, *};
 
-use crate::gui::song_history_interface::FavoritesInterface;
-
 use crate::gui::song_history_interface::{RecognitionHistoryInterface, SongRecordInterface};
 #[cfg(target_os = "linux")]
 use crate::plugins::ksni::SystrayInterface;
@@ -26,7 +24,7 @@ use crate::plugins::ksni::SystrayInterface;
 use crate::plugins::mpris_player::{get_player, update_song};
 use crate::utils::csv_song_history::SongHistoryRecord;
 use crate::utils::filesystem_operations::{
-    clear_cache, obtain_favorites_csv_path, obtain_recognition_history_csv_path,
+    clear_cache, obtain_recognition_history_csv_path,
 };
 
 use crate::core::preferences::{Preferences, PreferencesInterface};
@@ -55,7 +53,6 @@ struct App {
 
     preferences_interface: Arc<Mutex<PreferencesInterface>>,
     song_history_interface: Rc<RefCell<RecognitionHistoryInterface>>,
-    favorites_interface: Rc<RefCell<FavoritesInterface>>,
     old_preferences: Preferences,
 
     ctx_selected_item: Rc<RefCell<Option<HistoryEntry>>>,
@@ -111,12 +108,6 @@ impl App {
             .unwrap(),
         ));
 
-        let favorites_list_store = gio::ListStore::new::<HistoryEntry>();
-        let favorites_interface = Rc::new(RefCell::new(
-            FavoritesInterface::new(favorites_list_store.clone(), obtain_favorites_csv_path)
-                .unwrap(),
-        ));
-
         let builder = gtk::Builder::new();
 
         let builder_scope = gtk::BuilderRustScope::new();
@@ -128,7 +119,6 @@ impl App {
             gui_tx.clone(),
             builder.clone(),
             builder_scope,
-            favorites_interface.clone(),
             ctx_selected_item.clone(),
         );
         builder
@@ -138,25 +128,14 @@ impl App {
         let history_selection: gtk::SingleSelection = builder.object("history_selection").unwrap();
         history_selection.set_model(Some(&history_list_store));
 
-        let favorites_selection: gtk::SingleSelection =
-            builder.object("favorites_selection").unwrap();
-        favorites_selection.set_model(Some(&favorites_list_store));
-
         let preferences_interface: PreferencesInterface = PreferencesInterface::new();
         let old_preferences: Preferences = preferences_interface.preferences.clone();
         let preferences_interface = Arc::new(Mutex::new(preferences_interface));
-
-        let buffer_size_value: gtk::Adjustment = builder.object("buffer_size_value").unwrap();
-        buffer_size_value.set_value(old_preferences.buffer_size_secs.unwrap() as f64);
-
-        let request_interval_value: gtk::Adjustment = builder.object("interval_value").unwrap();
-        request_interval_value.set_value(old_preferences.request_interval_secs_v3.unwrap() as f64);
 
         App {
             builder,
 
             song_history_interface,
-            favorites_interface,
             preferences_interface,
             old_preferences,
 
@@ -344,22 +323,12 @@ impl App {
             self.builder.object("history_view").unwrap(),
             self.builder.object("history_context_menu").unwrap(),
             self.ctx_selected_item.clone(),
-            self.favorites_interface.clone(),
-        );
-
-        ContextMenuUtil::connect_menu_key_actions(
-            self.builder.clone(),
-            self.builder.object("favorites_view").unwrap(),
-            self.builder.object("history_context_menu").unwrap(),
-            self.ctx_selected_item.clone(),
-            self.favorites_interface.clone(),
         );
 
         ContextMenuUtil::bind_actions(
             self.builder.object("main_window").unwrap(),
             self.ctx_selected_item.clone(),
             self.song_history_interface.clone(),
-            self.favorites_interface.clone(),
         );
 
         // See:
@@ -373,7 +342,6 @@ impl App {
         gui_tx_shared: async_channel::Sender<GUIMessage>,
         builder_shared: gtk::Builder,
         builder_scope: gtk::BuilderRustScope,
-        favorites: Rc<RefCell<FavoritesInterface>>,
         ctx_selected_item: Rc<RefCell<Option<HistoryEntry>>>,
     ) {
         let microphone_tx = microphone_tx_shared.clone();
@@ -383,15 +351,9 @@ impl App {
             let popover_menu: gtk::PopoverMenu = builder.object("history_context_menu").unwrap();
 
             let builder = builder.clone();
-            let favorites = favorites.clone();
             let ctx_selected_item = ctx_selected_item.clone();
 
             let cell = values[1].get::<gtk::ColumnViewCell>().unwrap();
-            /* let column_view = values[0]
-            .get::<gtk::ColumnViewColumn>()
-            .unwrap()
-            .column_view()
-            .unwrap(); */
 
             let label = gtk::Label::new(None);
             label.set_xalign(0.0);
@@ -404,7 +366,6 @@ impl App {
                 label,
                 popover_menu,
                 ctx_selected_item,
-                favorites,
             );
 
             None
@@ -668,8 +629,6 @@ impl App {
         let old_device_name = self.old_preferences.current_device_name.clone();
 
         let window: adw::ApplicationWindow = self.builder.object("main_window").unwrap();
-        let systray_setting: adw::SwitchRow = self.builder.object("systray_setting").unwrap();
-        let mpris_setting: adw::SwitchRow = self.builder.object("mpris_setting").unwrap();
         let adw_combo_row: adw::ComboRow = self.builder.object("audio_inputs").unwrap();
         let g_list_store: gio::ListStore = self.builder.object("audio_inputs_model").unwrap();
         let microphone_switch: adw::SwitchRow = self.builder.object("microphone_switch").unwrap();
@@ -685,12 +644,6 @@ impl App {
         let results_image: gtk::Image = self.builder.object("results_image").unwrap();
         let results_label: gtk::Label = self.builder.object("results_label").unwrap();
         let loopback_switch: adw::SwitchRow = self.builder.object("loopback_switch").unwrap();
-
-        #[cfg(target_os = "linux")]
-        systray_setting.set_visible(true);
-
-        #[cfg(feature = "mpris")]
-        mpris_setting.set_visible(true);
 
         microphone_switch.set_active(set_recording);
 
@@ -1104,16 +1057,11 @@ impl App {
         });
     }
 
-    fn setup_actions(&self, application: &adw::Application, enable_mpris_cli: bool) {
+    fn setup_actions(&self, application: &adw::Application, _enable_mpris_cli: bool) {
         let window: adw::ApplicationWindow = self.builder.object("main_window").unwrap();
         let file_picker: gtk::FileDialog = self.builder.object("file_picker").unwrap();
-        let shortcuts_dialog: gtk::ShortcutsWindow =
-            self.builder.object("shortcuts_window").unwrap();
         let about_dialog: adw::AboutDialog = self.builder.object("about_dialog").unwrap();
         let results_label: gtk::Label = self.builder.object("results_label").unwrap();
-        let menu_button: gtk::MenuButton = self.builder.object("menu_button").unwrap();
-        let navigation_view: adw::NavigationView =
-            self.builder.object("main_window_pages").unwrap();
         let recognize_file_row: adw::PreferencesRow =
             self.builder.object("recognize_file_row").unwrap();
         let spinner_row: adw::PreferencesRow = self.builder.object("spinner_row").unwrap();
@@ -1214,182 +1162,9 @@ impl App {
             })
             .build();
 
-        let action_export_to_csv = gio::ActionEntry::builder("export-to-csv")
-            .activate(move |window: &adw::ApplicationWindow, _action, _obj| {
-                #[cfg(not(windows))]
-                {
-                    let window = window.clone();
-
-                    glib::spawn_future_local(async move {
-                        let launch_path = obtain_recognition_history_csv_path().unwrap();
-                        info!("Launching file: {}", launch_path);
-                        let launch_file = gio::File::for_path(launch_path.clone());
-                        if let Err(err) = gtk::FileLauncher::new(Some(&launch_file))
-                            .launch_future(Some(&window))
-                            .await
-                        {
-                            error!("Could not launch file {}: {:?}", launch_path, err);
-                        }
-                    });
-                }
-
-                #[cfg(windows)]
-                std::process::Command::new("cmd")
-                    .args(&[
-                        "/c",
-                        &format!("start {}", obtain_recognition_history_csv_path().unwrap()),
-                    ])
-                    .creation_flags(0x00000008) // Set "CREATE_NO_WINDOW" on Windows
-                    .output()
-                    .ok();
-            })
-            .build();
-
-        let action_export_favorites_to_csv = gio::ActionEntry::builder("export-favorites-to-csv")
-            .activate(move |window: &adw::ApplicationWindow, _action, _obj| {
-                #[cfg(not(windows))]
-                {
-                    let window = window.clone();
-
-                    glib::spawn_future_local(async move {
-                        let launch_path = obtain_favorites_csv_path().unwrap();
-                        info!("Launching file: {}", launch_path);
-                        let launch_file = gio::File::for_path(launch_path.clone());
-                        if let Err(err) = gtk::FileLauncher::new(Some(&launch_file))
-                            .launch_future(Some(&window))
-                            .await
-                        {
-                            error!("Could not launch file {}: {:?}", launch_path, err);
-                        }
-                    });
-                }
-
-                #[cfg(windows)]
-                std::process::Command::new("cmd")
-                    .args(&[
-                        "/c",
-                        &format!("start {}", obtain_favorites_csv_path().unwrap()),
-                    ])
-                    .creation_flags(0x00000008) // Set "CREATE_NO_WINDOW" on Windows
-                    .output()
-                    .ok();
-            })
-            .build();
-
-        let gui_tx = self.gui_tx.clone();
-
-        let action_wipe_history = gio::ActionEntry::builder("wipe-history")
-            .activate(move |_window, _action, _obj| {
-                gui_tx.try_send(GUIMessage::WipeSongHistory).unwrap();
-            })
-            .build();
-
-        let gui_tx = self.gui_tx.clone();
-
-        #[cfg(feature = "mpris")]
-        let action_mpris_setting = gio::ActionEntry::builder("mpris-setting")
-            .state(self.old_preferences.enable_mpris_v2.unwrap().to_variant())
-            .activate(move |_, action, _| {
-                let state = action.state().unwrap();
-                let action_state: bool = state.get().unwrap();
-                let new_state = !action_state; // toggle
-                action.set_state(&new_state.to_variant());
-
-                let mut new_preference: Preferences = Preferences::new();
-                new_preference.enable_mpris_v2 = Some(new_state);
-                gui_tx
-                    .try_send(GUIMessage::UpdatePreference(new_preference))
-                    .unwrap();
-            })
-            .build();
-
-        let gui_tx = self.gui_tx.clone();
-
-        let action_notification_setting = gio::ActionEntry::builder("notification-setting")
-            .state(
-                self.old_preferences
-                    .enable_notifications
-                    .unwrap()
-                    .to_variant(),
-            )
-            .activate(move |_, action, _| {
-                let state = action.state().unwrap();
-                let action_state: bool = state.get().unwrap();
-                let new_state = !action_state; // toggle
-                action.set_state(&new_state.to_variant());
-
-                let mut new_preference: Preferences = Preferences::new();
-                new_preference.enable_notifications = Some(new_state);
-                gui_tx
-                    .try_send(GUIMessage::UpdatePreference(new_preference))
-                    .unwrap();
-            })
-            .build();
-
-        let gui_tx = self.gui_tx.clone();
-        #[cfg(target_os = "linux")]
-        let ctx_systray_handle = self.ctx_systray_handle.clone();
-
-        #[cfg(target_os = "linux")]
-        let action_systray_setting = gio::ActionEntry::builder("systray-setting")
-            .state(self.old_preferences.enable_systray.unwrap().to_variant())
-            .activate(
-                move |window: &adw::ApplicationWindow, action: &gio::SimpleAction, _| {
-                    let state = action.state().unwrap();
-                    let action_state: bool = state.get().unwrap();
-                    let new_state = !action_state; // toggle
-                    action.set_state(&new_state.to_variant());
-
-                    let ctx_systray_handle = ctx_systray_handle.clone();
-
-                    if new_state {
-                        Self::setup_systray(ctx_systray_handle, window.clone(), gui_tx.clone());
-                    } else {
-                        Self::unsetup_systray(ctx_systray_handle, window.clone());
-                    }
-
-                    let mut new_preference: Preferences = Preferences::new();
-                    new_preference.enable_systray = Some(new_state);
-                    gui_tx
-                        .try_send(GUIMessage::UpdatePreference(new_preference))
-                        .unwrap();
-                },
-            )
-            .build();
-
-        let gui_tx = self.gui_tx.clone();
-
-        let action_no_dupes_setting = gio::ActionEntry::builder("no-dupes-setting")
-            .state(self.old_preferences.no_duplicates.unwrap().to_variant())
-            .activate(move |_, action, _| {
-                let state = action.state().unwrap();
-                let action_state: bool = state.get().unwrap();
-                let new_state = !action_state; // toggle
-                action.set_state(&new_state.to_variant());
-
-                let mut new_preference: Preferences = Preferences::new();
-                new_preference.no_duplicates = Some(new_state);
-                gui_tx
-                    .try_send(GUIMessage::UpdatePreference(new_preference))
-                    .unwrap();
-            })
-            .build();
-
         let action_close = gio::ActionEntry::builder("close")
             .activate(move |window: &adw::ApplicationWindow, _, _| {
                 window.close();
-            })
-            .build();
-
-        let action_display_shortcuts = gio::ActionEntry::builder("display-shortcuts")
-            .activate(move |_, _, _| {
-                shortcuts_dialog.present();
-            })
-            .build();
-
-        let action_show_preferences = gio::ActionEntry::builder("show-preferences")
-            .activate(move |_, _, _| {
-                navigation_view.push_by_tag("settings_tag");
             })
             .build();
 
@@ -1403,44 +1178,19 @@ impl App {
             })
             .build();
 
-        let action_show_menu = gio::ActionEntry::builder("show-menu")
-            .activate(move |_, _, _| {
-                menu_button.activate();
-            })
-            .build();
-
         window.add_action_entries([
             action_show_about,
             action_recognize_file,
             action_search_youtube,
-            action_export_to_csv,
-            action_export_favorites_to_csv,
-            action_wipe_history,
-            action_display_shortcuts,
-            action_show_preferences,
-            action_notification_setting,
-            #[cfg(target_os = "linux")]
-            action_systray_setting,
-            action_no_dupes_setting,
             action_refresh_devices,
             action_close,
-            action_show_menu,
         ]);
-
-        #[cfg(feature = "mpris")]
-        if enable_mpris_cli {
-            window.add_action_entries([action_mpris_setting]);
-        }
 
         // GDK key names are available here:
         // https://gitlab.gnome.org/GNOME/gtk/-/blob/main/gdk/gdkkeysyms.h
 
         application.set_accels_for_action("win.close", &["<Primary>Q", "<Primary>W"]);
         application.set_accels_for_action("win.recognize-file", &["<Primary>O"]);
-        application.set_accels_for_action("win.display-shortcuts", &["<Primary>question"]);
-        application
-            .set_accels_for_action("win.show-preferences", &["<Primary>comma", "<Primary>P"]);
-        application.set_accels_for_action("win.show-menu", &["F10"]);
     }
 
     fn show_window(&self, application: &adw::Application) {

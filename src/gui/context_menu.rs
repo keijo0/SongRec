@@ -9,8 +9,6 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::gui::song_history_interface::FavoritesInterface;
-
 use crate::gui::history_entry::HistoryEntry;
 use crate::gui::song_history_interface::{RecognitionHistoryInterface, SongRecordInterface};
 
@@ -23,7 +21,6 @@ impl ContextMenuUtil {
         label: gtk::Label,
         popover_menu: gtk::PopoverMenu,
         ctx_selected_item: Rc<RefCell<Option<HistoryEntry>>>,
-        favorites: Rc<RefCell<FavoritesInterface>>,
     ) {
         let touch_closure = clone!(
             #[weak]
@@ -34,7 +31,6 @@ impl ContextMenuUtil {
             popover_menu,
             move |_: &gtk::GestureClick, _n_press, x, y| {
                 let entry = cell.item();
-                // gesture.set_state(gtk::EventSequenceState::Claimed);
                 debug!("Selected item: {:?}", entry);
                 if let Some(record) = entry {
                     let record = record.downcast::<HistoryEntry>().unwrap();
@@ -42,14 +38,8 @@ impl ContextMenuUtil {
 
                     *ctx_selected_item.borrow_mut() = Some(record.clone());
 
-                    let unfaved_model: gio::Menu = builder.object("history_context_model").unwrap();
-                    let faved_model: gio::Menu =
-                        builder.object("history_context_model_faved").unwrap();
-                    if favorites.borrow().is_favorite(record.get_song()) {
-                        popover_menu.set_menu_model(Some(&faved_model));
-                    } else {
-                        popover_menu.set_menu_model(Some(&unfaved_model));
-                    }
+                    let context_model: gio::Menu = builder.object("history_context_model").unwrap();
+                    popover_menu.set_menu_model(Some(&context_model));
 
                     popover_menu.unparent();
                     popover_menu.set_has_arrow(true);
@@ -77,10 +67,7 @@ impl ContextMenuUtil {
         column_view: gtk::ColumnView,
         popover_menu: gtk::PopoverMenu,
         ctx_selected_item: Rc<RefCell<Option<HistoryEntry>>>,
-        favorites: Rc<RefCell<FavoritesInterface>>,
     ) {
-        // WIP BIND THE CONTEXT KEY + CTRL+C CLOSURES
-
         let controller = gtk::EventControllerKey::new();
 
         let selection: gtk::SingleSelection = column_view
@@ -99,30 +86,20 @@ impl ContextMenuUtil {
             #[upgrade_or]
             Propagation::Proceed,
             move |_event, key_val, _key_code, modifier| {
-                // gesture.set_state(gtk::EventSequenceState::Claimed);
                 if key_val == Key::Menu {
                     if let Some(record) = selection.selected_item() {
                         let record = record.downcast::<HistoryEntry>().unwrap();
 
                         *ctx_selected_item.borrow_mut() = Some(record.clone());
 
-                        let unfaved_model: gio::Menu =
+                        let context_model: gio::Menu =
                             builder.object("history_context_model").unwrap();
-                        let faved_model: gio::Menu =
-                            builder.object("history_context_model_faved").unwrap();
-                        if favorites.borrow().is_favorite(record.get_song()) {
-                            popover_menu.set_menu_model(Some(&faved_model));
-                        } else {
-                            popover_menu.set_menu_model(Some(&unfaved_model));
-                        }
+                        popover_menu.set_menu_model(Some(&context_model));
 
                         popover_menu.unparent();
                         popover_menu.set_has_arrow(false);
                         popover_menu.set_parent(&column_view);
-                        popover_menu.set_pointing_to(Some(&Rectangle::new(
-                            0, // popover_menu.size(gtk::Orientation::Horizontal) as i32,
-                            0, 1, 1,
-                        )));
+                        popover_menu.set_pointing_to(Some(&Rectangle::new(0, 0, 1, 1)));
                         popover_menu.popup();
                     }
                     Propagation::Stop
@@ -143,21 +120,12 @@ impl ContextMenuUtil {
             }
         ));
         column_view.add_controller(controller);
-
-        /* selection.connect_selection_changed(move |selection, _, _| {
-            if let Some(item) = selection.selected_item() {
-                history_interface.borrow_mut().set_hovered_record(
-                    item.downcast::<HistoryEntry>().unwrap()
-                );
-            }
-        }); */
     }
 
     pub fn bind_actions(
         window: adw::ApplicationWindow,
         ctx_selected_item: Rc<RefCell<Option<HistoryEntry>>>,
         history_interface: Rc<RefCell<RecognitionHistoryInterface>>,
-        favorites_interface: Rc<RefCell<FavoritesInterface>>,
     ) {
         let item = ctx_selected_item.clone();
         let action_copy_artist_track = gio::ActionEntry::builder("copy-artist-track")
@@ -245,35 +213,11 @@ impl ContextMenuUtil {
             .build();
 
         let item = ctx_selected_item.clone();
-        let favorites = favorites_interface.clone();
-        let action_add_favorites = gio::ActionEntry::builder("add-to-favorites")
-            .activate(move |_, _, _| {
-                if let Some(entry) = &*item.borrow() {
-                    favorites
-                        .borrow_mut()
-                        .add_row_and_save(entry.get_song_history_record());
-                }
-            })
-            .build();
-
-        let item = ctx_selected_item.clone();
         let history = history_interface.clone();
         let action_remove_history = gio::ActionEntry::builder("remove-from-history")
             .activate(move |_, _, _| {
                 if let Some(entry) = &*item.borrow() {
                     history.borrow_mut().remove(entry.get_song_history_record());
-                }
-            })
-            .build();
-
-        let item = ctx_selected_item.clone();
-        let favorites = favorites_interface.clone();
-        let action_remove_favorites = gio::ActionEntry::builder("remove-from-favorites")
-            .activate(move |_, _, _| {
-                if let Some(entry) = &*item.borrow() {
-                    favorites
-                        .borrow_mut()
-                        .remove(entry.get_song_history_record());
                 }
             })
             .build();
@@ -284,9 +228,7 @@ impl ContextMenuUtil {
             action_copy_artist,
             action_copy_track,
             action_copy_album,
-            action_add_favorites,
             action_remove_history,
-            action_remove_favorites,
             action_search_youtube,
         ]);
         window.insert_action_group("history-menu", Some(&actions));
