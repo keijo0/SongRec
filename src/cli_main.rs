@@ -73,7 +73,8 @@ pub fn cli_main(parameters: CLIParameters) -> Result<(), Box<dyn Error>> {
     });
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime for main loop");
-    rt.block_on(async move {
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&rt, async move {
         // Recognize once if an input file is provided
 
         let do_recognize_once = parameters.recognize_once || parameters.input_file.is_some();

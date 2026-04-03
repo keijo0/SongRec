@@ -36,7 +36,7 @@ pub async fn get_player(gui_mode: bool) -> Option<Player> {
     .await
     {
         Ok(player) => {
-            tokio::spawn(player.run());
+            tokio::task::spawn_local(player.run());
             Some(player)
         }
         Err(error) => {
